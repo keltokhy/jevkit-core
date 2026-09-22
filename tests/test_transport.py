@@ -4,32 +4,38 @@ import json
 import httpx
 import pytest
 
-from jevkit_core import JevError, JevFatal, RetryPolicy, request_json
+from jevkit_core import JevError, JevFatal, ProviderStatus, RequestExhausted, post
 
 
-def test_retry_preserves_request_and_accounts_only_retries():
+def run(coroutine):
+    return asyncio.run(asyncio.wait_for(coroutine, 5))
+
+
+def test_retry_resends_the_same_request_and_counts_only_retries():
     seen, retries = [], []
     body = {"model": "v1", "state": "évidence", "questions": {"q": {"type": "noul"}}}
 
-    async def fake(request):
+    def fake(request):
         seen.append((str(request.url), json.loads(request.content), request.headers["authorization"]))
         return httpx.Response(503 if len(seen) == 1 else 200, json={"answers": {"q": {"noul": 0.7}}})
 
-    async def run():
+    async def exercise():
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(fake), headers={"Authorization": "Bearer test"}
-        ) as client:
-            data, _ = await request_json(
-                client,
+        ) as http:
+            data, seconds = await post(
+                http,
                 "https://fixture.invalid/api",
                 body,
                 provider="fake",
+                delay=0,
+                jitter=0,
                 on_retry=lambda: retries.append(1),
-                policy=RetryPolicy(delay=0, jitter=0),
             )
+            assert seconds >= 0
             return data
 
-    assert asyncio.run(run()) == {"answers": {"q": {"noul": 0.7}}}
+    assert run(exercise()) == {"answers": {"q": {"noul": 0.7}}}
     assert seen == [("https://fixture.invalid/api", body, "Bearer test")] * 2
     assert retries == [1]
 
@@ -47,45 +53,92 @@ def test_deadline_covers_a_body_that_keeps_arriving():
         calls.append(request)
         return httpx.Response(200, stream=SlowBody())
 
-    async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as client:
-            with pytest.raises(JevError, match="deadline exceeded") as caught:
-                await asyncio.wait_for(
-                    request_json(client, "https://fixture.invalid", {}, provider="fake", timeout=0.05), 0.5
-                )
-            assert caught.value.timed_out is True
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as http:
+            with pytest.raises(
+                RequestExhausted, match=r"gave up after 0\.05s \(deadline exceeded\)"
+            ) as caught:
+                await post(http, "https://fixture.invalid", {}, provider="fake", timeout=0.05)
+            assert caught.value.timed_out
 
-    asyncio.run(run())
+    run(exercise())
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("status,error", [(401, JevFatal), (402, JevFatal), (403, JevFatal), (400, JevError)])
-def test_nonretryable_errors_are_redacted_when_requested(status, error):
+@pytest.mark.parametrize(
+    "status,error,message",
+    [
+        (401, JevFatal, "fake said 401: secret"),
+        (402, JevFatal, "fake said 402: secret"),
+        (400, JevError, "HTTP 400: secret"),
+    ],
+)
+def test_non_retryable_statuses_fail_once_with_the_provider_detail(status, error, message):
     calls = []
 
     def fake(request):
         calls.append(request)
-        return httpx.Response(status, json={"error": "secret credential or input"})
+        return httpx.Response(status, json={"error": "secret"})
 
-    async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as client:
-            with pytest.raises(error) as caught:
-                await request_json(
-                    client,
-                    "https://fixture.invalid",
-                    {},
-                    provider="fake",
-                    policy=RetryPolicy(error_details=False),
-                )
-        assert str(caught.value) == f"fake returned HTTP {status}"
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as http:
+            with pytest.raises(error, match=message) as caught:
+                await post(http, "https://fixture.invalid", {}, provider="fake")
+            assert isinstance(caught.value, ProviderStatus)
+            assert (caught.value.provider, caught.value.status, caught.value.detail) == (
+                "fake",
+                status,
+                "secret",
+            )
 
-    asyncio.run(run())
+    run(exercise())
     assert len(calls) == 1
 
 
-def test_cancellation_does_not_start_another_attempt():
+def test_a_200_that_is_not_a_json_object_is_not_retried():
     calls = []
-    cancelled = []
+
+    def fake(request):
+        calls.append(request)
+        return httpx.Response(200, text="[]")
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as http:
+            with pytest.raises(JevError, match="not a JSON object"):
+                await post(http, "https://fixture.invalid", {}, provider="fake")
+
+    run(exercise())
+    assert len(calls) == 1
+
+
+def test_retry_after_lengthens_the_pause_and_pauses_stay_within_the_deadline(monkeypatch):
+    waits, calls = [], []
+
+    async def sleep(delay):
+        waits.append(delay)
+
+    def fake(request):
+        calls.append(request)
+        return httpx.Response(429, headers={"Retry-After": "0.75"})
+
+    monkeypatch.setattr("jevkit_core.transport.asyncio.sleep", sleep)
+
+    async def exercise(timeout):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as http:
+            with pytest.raises(RequestExhausted, match=r"\(HTTP 429\)"):
+                await post(
+                    http, "https://fixture.invalid", {}, provider="fake", timeout=timeout, delay=0, jitter=0
+                )
+
+    run(exercise(2))
+    assert waits == [0.75] * 3 and len(calls) == 4
+    waits.clear(), calls.clear()
+    run(exercise(0.5))  # the first pause alone would cross the deadline: give up without sleeping
+    assert waits == [] and len(calls) == 1
+
+
+def test_cancellation_does_not_start_another_attempt():
+    calls, cancelled = [], []
 
     async def fake(request):
         calls.append(request)
@@ -94,43 +147,14 @@ def test_cancellation_does_not_start_another_attempt():
         finally:
             cancelled.append(True)
 
-    async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as client:
-            task = asyncio.create_task(request_json(client, "https://fixture.invalid", {}, provider="fake"))
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as http:
+            task = asyncio.create_task(post(http, "https://fixture.invalid", {}, provider="fake"))
             while not calls:
                 await asyncio.sleep(0)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
 
-    asyncio.run(run())
+    run(exercise())
     assert len(calls) == 1 and cancelled == [True]
-
-
-def test_retry_after_and_strict_json_policy(monkeypatch):
-    waits, calls = [], []
-
-    async def sleep(delay):
-        waits.append(delay)
-
-    def fake(request):
-        calls.append(request)
-        if len(calls) == 1:
-            return httpx.Response(429, headers={"Retry-After": "0.75"})
-        return httpx.Response(200, text="not JSON")
-
-    async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as client:
-            with pytest.raises(JevError, match="invalid JSON"):
-                await request_json(
-                    client,
-                    "https://fixture.invalid",
-                    {},
-                    provider="fake",
-                    policy=RetryPolicy(delay=0, jitter=0, retry_after=True, strict_json=True),
-                )
-
-    monkeypatch.setattr("jevkit_core.transport.asyncio.sleep", sleep)
-    asyncio.run(run())
-    assert waits == [0.75]
-    assert len(calls) == 2

@@ -1,63 +1,55 @@
-"""One HTTP retry and deadline implementation for all JevKit tools."""
+"""One HTTP retry and total-deadline implementation for every tool."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import math
 import random
 import time
-from dataclasses import dataclass
 
 import httpx
 
-from .errors import JevError, JevFatal, RequestExhausted
+from .errors import JevError, ProviderError, ProviderFatal, RequestExhausted
+from .protocol import error_detail
 
 RETRYABLE = frozenset({408, 429, 500, 502, 503, 504, 529})
 FATAL = frozenset({401, 402, 403})
 
 
-@dataclass(frozen=True)
-class RetryPolicy:
-    delay: float = 0.2
-    jitter: float = 0.1
-    retry_after: bool = False
-    strict_json: bool = False
-    require_answers: bool = True
-    error_details: bool = True
-
-
-DEFAULT_RETRY_POLICY = RetryPolicy()
-
-
-def json_object(response: httpx.Response) -> dict:
+def _json_object(response: httpx.Response) -> dict | None:
     try:
         data = response.json()
     except ValueError:
-        return {}
-    return data if isinstance(data, dict) else {}
+        return None
+    return data if isinstance(data, dict) else None
 
 
-def error_detail(data: dict) -> str:
-    found = data.get("error", data.get("detail"))
-    if isinstance(found, list):
-        found = "; ".join(error_detail({"detail": item}) for item in found)
-    elif isinstance(found, dict):
-        found = found.get("message") or found.get("msg") or json.dumps(found)
-    return " ".join(str(found or "").split())[:200]
+def _retry_after(response: httpx.Response) -> float:
+    try:
+        seconds = float(response.headers.get("Retry-After", 0))
+    except ValueError:
+        return 0.0
+    return seconds if math.isfinite(seconds) and seconds > 0 else 0.0
 
 
-async def request_json(
-    client: httpx.AsyncClient,
+async def post(
+    http: httpx.AsyncClient,
     url: str,
     body: dict,
     *,
     provider: str,
     timeout: float = 15.0,
     attempts: int = 4,
+    delay: float = 0.2,
+    jitter: float = 0.1,
     on_retry=None,
-    policy: RetryPolicy = DEFAULT_RETRY_POLICY,
 ) -> tuple[dict, float]:
+    """POST `body` and return the JSON object and the seconds the winning attempt took.
+
+    `timeout` bounds the whole call: every attempt, pause, and drip-fed body. Transport
+    failures and retryable statuses are retried with backoff and Retry-After; other statuses
+    and malformed 200 bodies fail at once.
+    """
     if isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be positive and finite")
     if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
@@ -70,50 +62,30 @@ async def request_json(
         if remaining <= 0:
             break
         started = time.perf_counter()
-        pause = policy.delay * 2**attempt + random.random() * policy.jitter
+        pause = delay * 2**attempt + random.random() * jitter
         try:
-            response = await asyncio.wait_for(client.post(url, json=body, timeout=remaining), remaining)
+            response = await asyncio.wait_for(http.post(url, json=body, timeout=remaining), remaining)
         except asyncio.TimeoutError:
-            last = "deadline exceeded"
-            timed_out = True
+            last, timed_out = "deadline exceeded", True
             break
         except httpx.TransportError as exc:
             last = type(exc).__name__
         else:
-            if response.status_code == 200 and policy.strict_json:
-                try:
-                    data = response.json()
-                except ValueError as exc:
-                    raise JevError("provider returned invalid JSON") from exc
-                if not isinstance(data, dict):
-                    raise JevError("provider returned a non-object response")
-            else:
-                data = json_object(response)
-            if response.status_code == 200 and (not policy.require_answers or "answers" in data):
+            if response.status_code == 200:
+                data = _json_object(response)
+                if data is None:
+                    raise JevError(f"{provider} returned a response that is not a JSON object")
                 return data, time.perf_counter() - started
-            if response.status_code in FATAL or (
-                response.status_code != 200 and response.status_code not in RETRYABLE
-            ):
-                error = JevFatal if response.status_code in FATAL else JevError
-                if not policy.error_details:
-                    raise error(f"{provider} returned HTTP {response.status_code}")
-                detail = error_detail(data) or response.text[:200]
-                message = (
-                    f"{provider} said {response.status_code}: {detail}"
-                    if error is JevFatal
-                    else f"HTTP {response.status_code}: {detail}"
-                )
-                raise error(message)
+            detail = error_detail(_json_object(response) or {}) or response.text[:200]
+            if response.status_code in FATAL:
+                raise ProviderFatal(provider, response.status_code, detail)
+            if response.status_code not in RETRYABLE:
+                raise ProviderError(provider, response.status_code, detail)
             last = f"HTTP {response.status_code}"
-            if policy.retry_after:
-                try:
-                    retry_after = float(response.headers.get("Retry-After", 0))
-                    if math.isfinite(retry_after):
-                        pause = max(pause, retry_after)
-                except ValueError:
-                    pass
-        if attempt + 1 < attempts:
-            if on_retry is not None:
-                on_retry()
-            await asyncio.sleep(max(0.0, min(pause, deadline - time.monotonic())))
+            pause = max(pause, _retry_after(response))
+        if attempt + 1 == attempts or pause >= deadline - time.monotonic():
+            break
+        if on_retry is not None:
+            on_retry()
+        await asyncio.sleep(pause)
     raise RequestExhausted(timeout, last, timed_out=timed_out)

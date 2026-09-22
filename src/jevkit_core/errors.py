@@ -1,4 +1,4 @@
-"""Errors shared by all JevKit client adapters."""
+"""Failure types shared by every JevKit tool."""
 
 
 class JevError(Exception):
@@ -13,10 +13,31 @@ class JevBudgetExceeded(Exception):
     """No cached or in-flight answer exists and a new paid request is forbidden."""
 
 
+class ProviderStatus(Exception):
+    """An HTTP status the provider answered with, kept structured so tools can word or redact it."""
+
+    def __init__(self, provider: str, status: int, detail: str):
+        self.provider, self.status, self.detail = provider, status, detail
+        super().__init__(self.message())
+
+    def message(self) -> str:
+        return f"HTTP {self.status}: {self.detail}"
+
+
+class ProviderError(ProviderStatus, JevError):
+    """A status that is neither retryable nor a reason to stop the run, such as a bad request."""
+
+
+class ProviderFatal(ProviderStatus, JevFatal):
+    """Authentication, payment, or permission failed; no further request can succeed."""
+
+    def message(self) -> str:
+        return f"{self.provider} said {self.status}: {self.detail}"
+
+
 class RequestExhausted(JevError):
-    """Structured exhaustion details let each CLI retain its error wording."""
+    """Every attempt within the deadline failed; `last` names the final failure."""
 
     def __init__(self, timeout: float, last: str, *, timed_out: bool = False):
-        self.timeout, self.last = timeout, last
-        self.timed_out = timed_out
+        self.timeout, self.last, self.timed_out = timeout, last, timed_out
         super().__init__(f"gave up after {timeout:g}s ({last})")

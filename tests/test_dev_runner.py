@@ -20,7 +20,6 @@ def test_subprocess_uses_selected_environment(tmp_path, monkeypatch, action):
     for directory in (core, repo):
         directory.mkdir()
         (directory / "pyproject.toml").touch()
-    (core / "consumer-baselines.json").write_text('{"jlink": "baseline"}')
     inherited = tmp_path / "unrelated-bin"
     inherited.mkdir()
     wrong = inherited / "jlink"

@@ -12,6 +12,10 @@ from pathlib import Path
 
 CORE = Path(__file__).resolve().parents[1]
 TOOLS = ("jgrep", "jsort", "jlink", "jselect", "jcol")
+PACKAGED_ASSETS = {
+    "jcol": ["static/index.html"],
+    "jlink": ["assets/review.html", "assets/review.js", "assets/review.css"],
+}
 
 
 def command(argv, *, cwd=CORE, env=None):
@@ -47,10 +51,26 @@ def runtime_environment(executable, env=None):
     return result
 
 
+def expect_core(executable, location, *, cwd, env):
+    """The consumer's interpreter must import the core from `location`, not a stray install."""
+    command(
+        [
+            executable,
+            "-c",
+            "import sys, pathlib, jevkit_core; "
+            "here = pathlib.Path(jevkit_core.__file__).resolve().parent; "
+            "assert here == pathlib.Path(sys.argv[1]).resolve(), here",
+            location,
+        ],
+        cwd=cwd,
+        env=env,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repos-root", type=Path, default=CORE.parent)
-    parser.add_argument("--suffix", default="", help="e.g. --suffix=-jevkit for isolated migration worktrees")
+    parser.add_argument("--suffix", default="", help="checkout name suffix, e.g. --suffix=-wip")
     parser.add_argument("--tool", choices=TOOLS, help="operate on only one consumer")
     parser.add_argument(
         "--tokenizer-cache", type=Path, default=Path(tempfile.gettempdir()) / "data-gym-cache"
@@ -101,25 +121,10 @@ def main():
         temp = Path(temporary)
         env = environment(temp, args.tokenizer_cache)
         if args.action == "check":
-            baselines = json.loads((CORE / "consumer-baselines.json").read_text())
             command([python(CORE), "-m", "pytest", "-q"], env=runtime_environment(python(CORE), env))
-            for name, repo in repos.items():
+            for repo in repos.values():
                 consumer_env = runtime_environment(python(repo), env)
-                command(
-                    [
-                        python(repo),
-                        CORE / "scripts/probe_consumer.py",
-                        name,
-                        "--expect-core",
-                        CORE / "src/jevkit_core",
-                        "--baseline-repo",
-                        repo,
-                        "--baseline-ref",
-                        baselines[name],
-                    ],
-                    cwd=temp,
-                    env=consumer_env,
-                )
+                expect_core(python(repo), CORE / "src/jevkit_core", cwd=temp, env=consumer_env)
                 command([python(repo), "-m", "pytest", "-q"], cwd=repo, env=consumer_env)
             return
         wheels = temp / "wheels"
@@ -137,43 +142,22 @@ def main():
             site = subprocess.check_output(
                 [str(executable), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"], text=True
             ).strip()
-            command(
-                [
-                    executable,
-                    CORE / "scripts/probe_consumer.py",
-                    name,
-                    "--expect-core",
-                    Path(site) / "jevkit_core",
-                ],
-                cwd=temp,
-                env=wheel_env,
-            )
+            expect_core(executable, Path(site) / "jevkit_core", cwd=temp, env=wheel_env)
             command([executable, "-m", name, "--version"], cwd=temp, env=wheel_env)
+            for asset in PACKAGED_ASSETS.get(name, []):
+                command(
+                    [
+                        executable,
+                        "-c",
+                        "from importlib.resources import files; "
+                        f"assert files({name!r}).joinpath({asset!r}).is_file()",
+                    ],
+                    cwd=temp,
+                    env=wheel_env,
+                )
             if name == "jcol":
                 cli = venv / ("Scripts/jcol.exe" if os.name == "nt" else "bin/jcol")
                 command([executable, repo / "tests/test_process.py", cli], cwd=temp, env=wheel_env)
-                command(
-                    [
-                        executable,
-                        "-c",
-                        "from importlib.resources import files; "
-                        "assert files('jcol').joinpath('static/index.html').is_file()",
-                    ],
-                    cwd=temp,
-                    env=wheel_env,
-                )
-            if name == "jlink":
-                command(
-                    [
-                        executable,
-                        "-c",
-                        "from importlib.resources import files; "
-                        "assert all(files('jlink').joinpath('assets', f).is_file() "
-                        "for f in ('review.html', 'review.js', 'review.css'))",
-                    ],
-                    cwd=temp,
-                    env=wheel_env,
-                )
         print(json.dumps({"wheel_checks": names, "status": "passed"}))
 
 

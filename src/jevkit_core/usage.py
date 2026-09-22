@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass, field
 
 from .backends import PRICE_PER_MTOK
@@ -14,6 +15,13 @@ class Usage:
     tokens: int | float
     cost: float
     source: str
+
+
+def record_usage(totals: MutableMapping, usage: Usage) -> None:
+    """Accumulate one validated response in existing meter or report fields."""
+    totals["calls"] += 1
+    totals["input_tokens"] += usage.tokens
+    totals["cost"] += usage.cost
 
 
 def parse_usage(
@@ -49,6 +57,26 @@ class Meter:
     cost: float = 0.0
     model: str = ""
     latencies: list[float] = field(default_factory=list)
+
+    def record(
+        self,
+        usage: Usage,
+        seconds: float,
+        *,
+        model: str | None = None,
+        on_cost: Callable[[float], None] | None = None,
+    ) -> None:
+        """Count the response before answer validation, including charges for invalid answers.
+
+        The request owner supplies on_cost; consumers of a shared request never
+        call it. Model fallback and tool-specific statistics remain adapter policy.
+        """
+        record_usage(vars(self), usage)
+        if on_cost is not None:
+            on_cost(usage.cost)
+        self.latencies.append(seconds)
+        if model is not None:
+            self.model = model
 
     def summary(self) -> str:
         parts = [f"{self.calls:,} calls, {self.cached:,} cached"]

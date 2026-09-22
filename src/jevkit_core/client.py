@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+from collections.abc import Callable, Coroutine, Iterable
+from typing import Any, TypeVar
 
 import httpx
 
@@ -12,6 +14,8 @@ from . import transport
 from .backends import Backend
 from .errors import JevError
 from .usage import Meter
+
+T = TypeVar("T")
 
 
 def validate_answer(qid: str, question: dict, answer) -> None:
@@ -60,6 +64,29 @@ class DecisionClient:
 
     async def close(self) -> None:
         await self.http.aclose()
+
+    def share_request(
+        self, keys: Iterable[str], start: Callable[[], Coroutine[Any, Any, T]]
+    ) -> tuple[asyncio.Task[T], bool]:
+        """Get an in-flight request and whether this caller started it.
+
+        Called on the client's event loop without yielding. The lazy factory runs
+        only for new requests, so admission checks and charge callbacks belong to
+        the owner. Callers keep their existing awaiting/cancellation or hedging policy.
+        """
+        flight = "|".join(sorted(keys))
+        if (task := self._flights.get(flight)) is not None:
+            self.meter.cached += 1
+            return task, False
+        task = asyncio.ensure_future(start())
+        self._flights[flight] = task
+
+        def discard(completed):
+            if self._flights.get(flight) is completed:
+                del self._flights[flight]
+
+        task.add_done_callback(discard)
+        return task, True
 
     async def _call(self, state, questions: dict[str, dict], **kwargs):
         body = {"model": self.model, "state": state, "questions": questions}

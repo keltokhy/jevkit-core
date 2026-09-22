@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .errors import JevFatal
@@ -59,6 +59,57 @@ class Backend:
 
     def endpoint(self) -> str:
         return os.environ.get("JEV_URL") or self.configured_url() or self.url
+
+
+PROVIDERS = {
+    "typesafe": Backend("typesafe", "https://api.typesafe.ai/v1/systemone", "jev-latest", "TYPESAFE_API_KEY"),
+    "openrouter": Backend(
+        "openrouter",
+        "https://openrouter.ai/api/alpha/decisions",
+        "~typesafe/jev-latest",
+        "OPENROUTER_API_KEY",
+    ),
+    "gateway": Backend("gateway", "", "jev-latest", "JEV_GATEWAY_API_KEY", url_env="JEV_GATEWAY_URL"),
+    # Local servers are explicit opt-ins and never replace a configured hosted provider.
+    "diffusiongemma": Backend(
+        "diffusiongemma",
+        "http://127.0.0.1:8080/v1/systemone",
+        "openjev-latest",
+        "JEV_DIFFUSIONGEMMA_API_KEY",
+        url_env="JEV_DIFFUSIONGEMMA_URL",
+        requires_key=False,
+        auto_select=False,
+        price_per_mtok=float(os.environ.get("JEV_PRICE_PER_MTOK", 0)),
+        cache_by_request=True,
+    ),
+    "laya": Backend(
+        "laya",
+        "http://127.0.0.1:8081/v1/systemone",
+        "laya-421m",
+        "JEV_LAYA_API_KEY",
+        url_env="JEV_LAYA_URL",
+        requires_key=False,
+        auto_select=False,
+        price_per_mtok=float(os.environ.get("JEV_PRICE_PER_MTOK", 0)),
+    ),
+}
+
+
+def backend_catalog(
+    *names: str, models: dict[str, str] | None = None, backend_type: type[Backend] = Backend
+) -> dict[str, Backend]:
+    """Select providers in priority order, retaining tool-owned model defaults and adapters.
+
+    Both the mapping and its definitions are fresh, so a consumer's overrides never
+    change another consumer's catalog. Unknown providers or unused overrides fail early.
+    """
+    models = {} if models is None else models
+    if unknown := models.keys() - set(names):
+        raise ValueError(f"model overrides for unselected providers: {', '.join(sorted(unknown))}")
+    return {
+        name: backend_type(**(asdict(PROVIDERS[name]) | {"model": models.get(name, PROVIDERS[name].model)}))
+        for name in names
+    }
 
 
 def resolve_backend(

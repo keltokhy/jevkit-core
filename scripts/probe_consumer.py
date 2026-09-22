@@ -7,16 +7,19 @@ import asyncio
 import importlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
+from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 
 import jevkit_core
-from jevkit_core import transport
+from jevkit_core import transport, usage
 
 
 def normalized(value):
@@ -25,6 +28,36 @@ def normalized(value):
     if isinstance(value, list):
         return [normalized(v) for v in value]
     return value
+
+
+def catalog_snapshot(module, tool):
+    if tool != "jselect":
+        # Older adapters implicitly had these capabilities before Backend gained fields.
+        defaults = {
+            "url_env": None,
+            "requires_key": True,
+            "auto_select": True,
+            "cache_by_request": False,
+            "price_per_mtok": module.PRICE_PER_MTOK,
+        }
+        return {name: defaults | asdict(backend) for name, backend in module.BACKENDS.items()}
+    # Resolve with fixture credentials, including jselect's intentionally pinned models.
+    with patch.dict(
+        os.environ,
+        {
+            "JEV_API": "",
+            "JEV_URL": "",
+            "JEV_MODEL": "",
+            "TYPESAFE_API_KEY": "fixture",
+            "OPENROUTER_API_KEY": "fixture",
+            "JEV_GATEWAY_API_KEY": "fixture",
+            "JEV_GATEWAY_URL": "https://gateway.invalid",
+        },
+    ):
+        return {
+            name: {key: value for key, value in asdict(module.resolve_backend(name)).items() if key != "key"}
+            for name in ("typesafe", "openrouter", "gateway")
+        }
 
 
 async def exercise(module, tool, path):
@@ -92,7 +125,12 @@ async def exercise(module, tool, path):
         finally:
             await client.close()
             cache.db.close()
-    return {"requests": requests, "answers": answers, "stats": stats}
+    return {
+        "requests": requests,
+        "answers": answers,
+        "stats": stats,
+        "providers": catalog_snapshot(module, tool),
+    }
 
 
 def main():
@@ -106,24 +144,52 @@ def main():
         assert Path(jevkit_core.__file__).resolve().parent == args.expect_core.resolve()
     name = "judge" if args.tool == "jselect" else "core"
     consumer = importlib.import_module(f"{args.tool}.{name}")
+    assert consumer.backend_catalog is jevkit_core.backend_catalog
     if args.tool != "jselect":
         assert issubclass(consumer.Jev, jevkit_core.DecisionClient)
         assert issubclass(consumer.Cache, jevkit_core.AnswerCache)
     shared_calls = []
+    charges, owners, origins = [], [], []
     original = transport.request_json
+    original_record = usage.record_usage
+    original_share = jevkit_core.DecisionClient.share_request
+    original_provenance = jevkit_core.answer_provenance
 
     async def observed(*values, **kwargs):
         shared_calls.append(kwargs["provider"])
         return await original(*values, **kwargs)
 
+    def recorded(totals, response_usage):
+        charges.append(response_usage.cost)
+        return original_record(totals, response_usage)
+
+    def shared(client, keys, start):
+        result = original_share(client, keys, start)
+        owners.append(result[1])
+        return result
+
+    def provenance(**kwargs):
+        result = original_provenance(**kwargs)
+        origins.append(result)
+        return result
+
     with tempfile.TemporaryDirectory(prefix="jevkit-contract-") as temporary:
         temp = Path(temporary)
-        transport.request_json = observed
-        try:
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(transport, "request_json", observed))
+            stack.enter_context(patch.object(usage, "record_usage", recorded))
+            stack.enter_context(patch.object(jevkit_core.DecisionClient, "share_request", shared))
+            if args.tool == "jselect":
+                stack.enter_context(patch.object(consumer, "record_usage", recorded))
+            if args.tool in ("jsort", "jlink"):
+                stack.enter_context(patch.object(consumer, "answer_provenance", provenance))
             actual = asyncio.run(exercise(consumer, args.tool, temp / "current.sqlite"))
-        finally:
-            transport.request_json = original
         assert len(shared_calls) == len(actual["requests"]), "consumer bypassed shared transport"
+        assert len(charges) == len(actual["requests"]), "consumer bypassed shared accounting"
+        if args.tool != "jselect":
+            assert sum(owners) == len(actual["requests"]) and owners.count(False) == 1
+        if args.tool in ("jsort", "jlink"):
+            assert len(origins) == len(actual["requests"]), "consumer bypassed shared provenance"
         compared = False
         if args.baseline_repo:
             source = subprocess.check_output(
@@ -154,6 +220,9 @@ def main():
                 "requests": len(shared_calls),
                 "baseline_matched": compared,
                 "shared_transport_verified": True,
+                "shared_accounting_verified": True,
+                "shared_request_verified": args.tool != "jselect",
+                "shared_provenance_verified": args.tool in ("jsort", "jlink"),
             }
         )
     )

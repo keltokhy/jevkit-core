@@ -28,20 +28,20 @@ jevkit-runtime = { path = "../jevkit-core", editable = true }
 Clone `keltokhy/jevkit-core` beside `keltokhy/jgrep`, `keltokhy/jsort`,
 `keltokhy/jlink`, `keltokhy/jselect`, and `keltokhy/jcol`. All six repositories
 remain independently versioned. For isolated development checkouts named
-`jgrep-jevkit` and so on, use the `--suffix=-jevkit` option shown below.
+`jgrep-jevkit` and so on, add `--suffix=-jevkit` before the action.
 
 From this directory:
 
 ```bash
-python3 scripts/dev.py --suffix=-jevkit setup
-python3 scripts/dev.py --suffix=-jevkit check
-python3 scripts/dev.py --suffix=-jevkit wheel-check
-python3 scripts/dev.py --suffix=-jevkit run jgrep -- --help
+python3 scripts/dev.py setup
+python3 scripts/dev.py check
+python3 scripts/dev.py wheel-check
+python3 scripts/dev.py run jgrep -- --help
 ```
 
 `run` uses the selected worktree's virtual environment and preserves the caller's
 working directory. To use it with data, replace `--help` with the normal tool arguments.
-For ordinary unsuffixed clones, omit `--suffix`. `--repos-root` selects their parent;
+`--repos-root` selects the checkouts' parent;
 `--tool jgrep` limits setup and checks to one consumer.
 
 `setup` installs dependencies and prepares the public tiktoken encoding files needed
@@ -125,7 +125,7 @@ The adapter tests remain the source of truth for each tool's external behavior.
 ## Cross-repository validation
 
 ```bash
-python3 scripts/dev.py --suffix=-jevkit check
+python3 scripts/dev.py check
 ```
 
 For a before/after request, result, and metering comparison, use a consumer's

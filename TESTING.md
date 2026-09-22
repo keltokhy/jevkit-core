@@ -50,14 +50,15 @@ Additional checks:
 - The installed jcol process checks pass for pipes, partial completion/resume,
   offline export, Parquet stdin, and SIGINT recovery.
 - Core and jselect lint/format checks pass. All modified GitHub workflow YAML parses;
-  all repository diffs pass whitespace checks. Hosted CI has not been run.
+  all repository diffs pass whitespace checks. The initial six PRs and the
+  individual main-branch suites also passed hosted CI on Python 3.10 and 3.13.
 
 Reproduce the suite from the core checkout:
 
 ```bash
-python3 scripts/dev.py --suffix=-jevkit setup
-python3 scripts/dev.py --suffix=-jevkit check
-python3 scripts/dev.py --suffix=-jevkit wheel-check
+python3 scripts/dev.py setup
+python3 scripts/dev.py check
+python3 scripts/dev.py wheel-check
 ```
 
 Current logs are retained in `/Volumes/K3/agent-working-space/jevkit/`:
@@ -67,10 +68,12 @@ provider-comparison runs are preserved separately. Those preliminary comparisons
 needed normalization of implicit legacy capability fields; consumer behavior did
 not require a correction. These logs are development artifacts, not package contents.
 
-Release boundary: this validates the local development implementation and locally
-built packages. It does not establish live model quality, hosted CI status, or
-publication. The core remote/tag/package must be published before migrated consumer
-CI and public releases can resolve their pinned core dependency.
+Release verification: `jevkit-runtime 0.1.0` is published on PyPI and the
+`v0.1.0` GitHub release. Freshly built wheels of all five consumers installed
+in separate temporary environments with the runtime resolved from PyPI. Their
+CLI and instrumented offline probes passed (`pypi-install-check.log`). These
+checks do not establish live model quality. Consumer PyPI releases remain
+independently versioned and were not published as part of this migration.
 
 
 ## GitHub bootstrap
@@ -92,4 +95,18 @@ Trusted Publishing is configured; Git tags alone do not publish a distribution.
 
 Bootstrap logs: `publish-setup.log`, `publish-check.log`, and `publish-wheels.log`
 in the same local report directory. The source-only jgrep migration, distribution
-rename, and installed wheel paths are verified again before merging.
+rename, and installed wheel paths were verified again before merging.
+
+
+## Development runner PATH regression
+
+The first hosted downstream run exposed a runner-only issue: Python used the
+selected virtual environment, but subprocess CLI lookup inherited the system
+PATH. jlink's installed-entrypoint checks therefore found Java's `jlink` and
+could not find `jev-link`. The runner now prepends the selected environment's
+executable directory and sets `VIRTUAL_ENV` for run, check, and wheel-check.
+
+Three regression cases reproduce a conflicting command on PATH and verify that
+each action selects its own environment. All three failed before the fix and
+passed afterward, bringing the core suite to 47 tests. The published runtime
+code and v0.1.0 tag are unchanged by this development-script correction.

@@ -10,6 +10,8 @@ dependencies = ["httpx>=0.27"]
 
 [project.urls]
 Homepage = "https://github.com/keltokhy/jevkit-core"
+Repository = "https://github.com/keltokhy/jevkit-core"
+Changelog = "https://github.com/keltokhy/jevkit-core/blob/main/CHANGELOG.md"
 Issues = "https://github.com/keltokhy/jevkit-core/issues"
 
 [project.optional-dependencies]

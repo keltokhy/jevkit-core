@@ -24,6 +24,9 @@ def test_settings_read_every_convention_once(monkeypatch, tmp_path):
     settings = Settings.from_env()
     assert settings.config_dir == tmp_path / "jev"
     assert (settings.api, settings.model, settings.price_per_mtok) == ("gateway", "pinned", 0.5)
+    assert settings.list_price == 0.5
+    monkeypatch.delenv("JEV_PRICE_PER_MTOK")
+    assert Settings.from_env().price_per_mtok is None and Settings.from_env().list_price == 0.042
     monkeypatch.setenv("JEV_PRICE_PER_MTOK", "lots")
     with pytest.raises(JevFatal, match="JEV_PRICE_PER_MTOK"):
         Settings.from_env()
@@ -93,14 +96,44 @@ def test_gateway_needs_a_complete_endpoint(monkeypatch, tmp_path):
     assert resolve(providers, "gateway").url == "https://override.invalid/v1"
 
 
-def test_a_tool_can_add_its_own_provider(monkeypatch):
+def test_local_servers_are_free_keyless_and_chosen_only_by_name(monkeypatch):
+    providers = catalog("typesafe", "diffusiongemma", "laya")
+    monkeypatch.setenv("JEV_DIFFUSIONGEMMA_API_KEY", "optional")
+    with pytest.raises(JevFatal, match="Set TYPESAFE_API_KEY, or put"):
+        resolve(providers)
+    gemma = resolve(providers, "diffusiongemma")
+    assert (gemma.url, gemma.model, gemma.key, gemma.price_per_mtok, gemma.joint_reads) == (
+        "http://127.0.0.1:8080/v1/systemone",
+        "openjev-latest",
+        "optional",
+        0.0,
+        True,
+    )
+    laya = resolve(providers, "laya")
+    assert (laya.key, laya.price_per_mtok, laya.joint_reads) == ("", 0.0, False)
+    monkeypatch.setenv("JEV_LAYA_URL", "http://gpu-box:8081/v1/systemone")
+    assert resolve(providers, "laya").url == "http://gpu-box:8081/v1/systemone"
+
+
+def test_price_comes_from_the_environment_then_the_provider_then_the_list(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "key")
+    monkeypatch.setenv("M_KEY", "key")
+    metered = Provider("metered", "https://m.invalid/v1", "m", "M_KEY", price_per_mtok=0.25)
+    providers = catalog("typesafe", "laya", metered)
+    assert resolve(providers, "typesafe").price_per_mtok == 0.042
+    assert resolve(providers, "laya").price_per_mtok == 0.0
+    assert resolve(providers, "metered").price_per_mtok == 0.25
+    monkeypatch.setenv("JEV_PRICE_PER_MTOK", "0.5")
+    assert {resolve(providers, name).price_per_mtok for name in providers} == {0.5}
+
+
+def test_a_tool_can_add_its_own_provider():
     local = Provider(
-        "local", "http://127.0.0.1:8080/v1", "local-v1", "LOCAL_KEY", requires_key=False, auto_select=False
+        "local", "http://127.0.0.1:9000/v1", "local-v1", "LOCAL_KEY", requires_key=False, auto_select=False
     )
     providers = catalog("typesafe", local)
     assert list(providers) == ["typesafe", "local"]
     with pytest.raises(JevFatal, match="no API key"):
         resolve(providers)
-    monkeypatch.setenv("JEV_PRICE_PER_MTOK", "0")
     backend = resolve(providers, "local")
-    assert (backend.key, backend.price_per_mtok, backend.url) == ("", 0.0, "http://127.0.0.1:8080/v1")
+    assert (backend.key, backend.price_per_mtok, backend.url) == ("", 0.042, "http://127.0.0.1:9000/v1")

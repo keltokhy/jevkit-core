@@ -23,6 +23,14 @@ def answer_key(backend: Backend, state, question: dict) -> str:
     return digest([ANSWER_KEY_VERSION, backend.name, backend.url, backend.model, state, question])
 
 
+def answer_keys(backend: Backend, state, questions: dict[str, dict]) -> dict[str, str]:
+    """Each question's identity. Under joint reads it is the whole batch, which every answer depends on."""
+    if not backend.joint_reads:
+        return {qid: answer_key(backend, state, question) for qid, question in questions.items()}
+    batch = list(questions.items())
+    return {qid: answer_key(backend, state, {"slot": qid, "batch": batch}) for qid in questions}
+
+
 def request_body(model: str, state, questions: dict[str, dict]) -> dict:
     return {"model": model, "state": state, "questions": questions}
 

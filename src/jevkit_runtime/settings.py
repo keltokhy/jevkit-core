@@ -22,7 +22,7 @@ class Settings:
     api: str | None = None
     url: str | None = None
     model: str | None = None
-    price_per_mtok: float = DEFAULT_PRICE_PER_MTOK
+    price_per_mtok: float | None = None  # JEV_PRICE_PER_MTOK when set; see list_price
     environ: Mapping[str, str] = field(default_factory=lambda: os.environ, repr=False, compare=False)
 
     @classmethod
@@ -30,12 +30,14 @@ class Settings:
         env = os.environ if environ is None else environ
         home = Path.home()
         raw_price = env.get("JEV_PRICE_PER_MTOK", "").strip()
-        try:
-            price = float(raw_price) if raw_price else DEFAULT_PRICE_PER_MTOK
-        except ValueError:
-            raise JevFatal(f"JEV_PRICE_PER_MTOK must be a number, not {raw_price!r}") from None
-        if not math.isfinite(price) or price < 0:
-            raise JevFatal("JEV_PRICE_PER_MTOK must be finite and nonnegative")
+        price = None
+        if raw_price:
+            try:
+                price = float(raw_price)
+            except ValueError:
+                raise JevFatal(f"JEV_PRICE_PER_MTOK must be a number, not {raw_price!r}") from None
+            if not math.isfinite(price) or price < 0:
+                raise JevFatal("JEV_PRICE_PER_MTOK must be finite and nonnegative")
         return cls(
             config_dir=Path(env.get("XDG_CONFIG_HOME") or home / ".config") / "jev",
             cache_dir=Path(env.get("XDG_CACHE_HOME") or home / ".cache") / "jev",
@@ -45,6 +47,11 @@ class Settings:
             price_per_mtok=price,
             environ=env,
         )
+
+    @property
+    def list_price(self) -> float:
+        """Dollars per million input tokens when neither the environment nor a provider says otherwise."""
+        return DEFAULT_PRICE_PER_MTOK if self.price_per_mtok is None else self.price_per_mtok
 
     def credential(self, name: str, variable: str) -> tuple[str, str]:
         """A provider key and where it came from: `env`, `file`, or `none`."""

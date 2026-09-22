@@ -22,6 +22,8 @@ class Provider:
     url_env: str | None = None
     requires_key: bool = True
     auto_select: bool = True
+    price_per_mtok: float | None = None  # when the server reports no cost; None means the list price
+    joint_reads: bool = False  # every answer depends on the whole batch of questions, not on its own
 
     def key_file(self, settings: Settings) -> Path:
         return settings.config_dir / f"{self.name}.key"
@@ -55,6 +57,7 @@ class Backend:
     key: str = ""
     key_source: str = "none"
     price_per_mtok: float = DEFAULT_PRICE_PER_MTOK
+    joint_reads: bool = False
 
 
 PROVIDERS = {
@@ -68,6 +71,29 @@ PROVIDERS = {
         "OPENROUTER_API_KEY",
     ),
     "gateway": Provider("gateway", "", "jev-latest", "JEV_GATEWAY_API_KEY", url_env="JEV_GATEWAY_URL"),
+    # Local servers: chosen only by name, never in place of a configured hosted provider, and free
+    # of API fees. The models run in their own processes; no JevKit package ships them.
+    "diffusiongemma": Provider(
+        "diffusiongemma",
+        "http://127.0.0.1:8080/v1/systemone",
+        "openjev-latest",
+        "JEV_DIFFUSIONGEMMA_API_KEY",
+        url_env="JEV_DIFFUSIONGEMMA_URL",
+        requires_key=False,
+        auto_select=False,
+        price_per_mtok=0.0,
+        joint_reads=True,  # a diffusion read answers every slot in the light of the others
+    ),
+    "laya": Provider(
+        "laya",
+        "http://127.0.0.1:8081/v1/systemone",
+        "laya-421m",
+        "JEV_LAYA_API_KEY",
+        url_env="JEV_LAYA_URL",
+        requires_key=False,
+        auto_select=False,
+        price_per_mtok=0.0,
+    ),
 }
 
 
@@ -139,6 +165,19 @@ def _backend(provider: Provider, key: str, source: str, model: str | None, setti
         parsed = None
     if parsed is None or parsed.scheme not in ("http", "https") or not parsed.host:
         raise JevFatal(f"{provider.name} endpoint must be a complete HTTP or HTTPS URL, not {url!r}")
+    price = (
+        settings.price_per_mtok
+        if settings.price_per_mtok is not None
+        else provider.price_per_mtok
+        if provider.price_per_mtok is not None
+        else DEFAULT_PRICE_PER_MTOK
+    )
     return Backend(
-        provider.name, url, model or settings.model or provider.model, key, source, settings.price_per_mtok
+        provider.name,
+        url,
+        model or settings.model or provider.model,
+        key,
+        source,
+        price,
+        provider.joint_reads,
     )

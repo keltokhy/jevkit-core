@@ -5,6 +5,7 @@ from jevkit_runtime import (
     JevError,
     JevFatal,
     answer_key,
+    answer_keys,
     parse_answers,
     parse_usage,
     validate_answer,
@@ -21,6 +22,18 @@ def test_answer_key_depends_on_who_answers_and_what_was_asked():
     assert key != answer_key(Backend("typesafe", "https://two.invalid", "m"), "évidence", question)
     assert key != answer_key(Backend("typesafe", "https://one.invalid", "m2"), "évidence", question)
     assert key != answer_key(BACKEND, "évidence ", question)
+
+
+def test_joint_reads_key_every_slot_on_the_whole_batch():
+    q = {"type": "noul", "instructions": "rule"}
+    plain = answer_keys(BACKEND, "s", {"a": q, "b": q})
+    assert plain == {"a": answer_key(BACKEND, "s", q), "b": answer_key(BACKEND, "s", q)}
+    joint = Backend("typesafe", "https://one.invalid", "m", joint_reads=True)
+    keys = answer_keys(joint, "s", {"a": q, "b": q})
+    assert len(set(keys.values())) == 2 and not set(keys.values()) & set(plain.values())
+    assert answer_keys(joint, "s", {"a": q, "b": q}) == keys
+    assert answer_keys(joint, "s", {"b": q, "a": q})["a"] != keys["a"]  # order is part of the read
+    assert answer_keys(joint, "s", {"a": q})["a"] != keys["a"]  # so is company
 
 
 @pytest.mark.parametrize(

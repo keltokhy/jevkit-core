@@ -15,6 +15,7 @@ from .protocol import (
     QUESTION_TYPES,
     Usage,
     answer_key,
+    answer_keys,
     digest,
     error_detail,
     parse_answers,
@@ -27,7 +28,7 @@ from .settings import DEFAULT_PRICE_PER_MTOK, Settings
 from .store import AnswerStore, Entry
 from .transport import FATAL, RETRYABLE, post
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
     "AnswerStore",
     "Answers",
@@ -51,6 +52,7 @@ __all__ = [
     "Settings",
     "Usage",
     "answer_key",
+    "answer_keys",
     "catalog",
     "digest",
     "error_detail",

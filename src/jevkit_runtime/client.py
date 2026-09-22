@@ -14,6 +14,7 @@ from .errors import JevBudgetExceeded
 from .meter import Meter
 from .protocol import (
     answer_key,
+    answer_keys,
     answer_origin,
     parse_answers,
     parse_usage,
@@ -106,6 +107,9 @@ class Client:
     def key(self, state, question: dict) -> str:
         return answer_key(self.backend, state, question)
 
+    def keys(self, state, questions: dict[str, dict]) -> dict[str, str]:
+        return answer_keys(self.backend, state, questions)
+
     async def ask(
         self,
         state,
@@ -123,7 +127,7 @@ class Client:
         `on_cost` is charged only by the caller whose request actually went out. `hedge_after`
         sends a slow call a second time and keeps the first answer.
         """
-        keys = dict(keys) if keys is not None else {qid: self.key(state, q) for qid, q in questions.items()}
+        keys = dict(keys) if keys is not None else self.keys(state, questions)
         answers: dict[str, dict] = {}
         origins: dict[str, dict] = {}
         if self.store is not None:
@@ -133,6 +137,11 @@ class Client:
                     answers[qid] = entry.answer
                     origins[qid] = dict(entry.metadata or {}) | {"source": "cache"}
         misses = {qid: q for qid, q in questions.items() if qid not in answers}
+        if misses and self.backend.joint_reads and len(misses) != len(questions):
+            # Each slot was answered in the light of the others; asking for some alone would change that.
+            answers.clear()
+            origins.clear()
+            misses = dict(questions)
         if not misses:
             self.meter.cached += 1
         else:

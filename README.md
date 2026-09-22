@@ -48,10 +48,28 @@ HTTP/2 is used whenever the `http2` extra is installed.
 - **Credentials** come from the provider's variable, then `$XDG_CONFIG_HOME/jev/<provider>.key`.
   Gateways take their URL from `JEV_GATEWAY_URL` or `<provider>.url`. `JEV_URL` overrides any endpoint.
 - **Metering** refuses malformed usage rather than under-counting; a response without a reported
-  cost is priced from its tokens at the run's list price.
+  cost is priced from its tokens at the provider's price, zero for local servers, or the list price.
+  `JEV_PRICE_PER_MTOK` overrides both.
 - **Errors** keep their wording across tools: a fatal status reads `PROVIDER said 401: detail`, a
   bad request reads `HTTP 400: detail`, and exhaustion reads `gave up after 15s (last failure)`.
   Both status errors carry `provider`, `status` and `detail` for tools that word or redact them.
+
+## Local servers
+
+Two catalog entries point at System One servers on your own machine: `diffusiongemma`, an
+[OpenJev](https://github.com/razorback16/openjev) server on port 8080, and `laya`, a
+[laya-mlx](https://github.com/mizorewww/laya-mlx) server on port 8081. Every JevKit tool names
+them in its catalog, so `--api laya` or `JEV_API=laya` works everywhere. They are never chosen
+in place of a configured hosted provider, need no key, and are metered at zero API fees unless
+`JEV_PRICE_PER_MTOK` says otherwise. `JEV_LAYA_URL` and `JEV_DIFFUSIONGEMMA_URL`, or the matching
+`.url` files, point at a server elsewhere.
+
+DiffusionGemma reads every question in a batch together, so the runtime keys each of its answers
+on the whole ordered batch and re-sends a batch whole when any slot is missing.
+
+No package ships the models. [docs/diffusiongemma.md](docs/diffusiongemma.md) and
+[docs/laya.md](docs/laya.md) explain how to run the servers, and `scripts/laya_server.py` is the
+adapter the Laya guide starts.
 
 ## Development
 

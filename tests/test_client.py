@@ -198,6 +198,30 @@ def test_a_slow_call_is_hedged_and_the_first_answer_wins():
     run(exercise())
 
 
+def test_a_joint_read_is_reused_whole_or_repeated_whole(tmp_path):
+    fake = Fake()
+    store = AnswerStore(tmp_path / "answers.sqlite")
+    joint = Backend(
+        "diffusiongemma", "http://127.0.0.1:8080/v1/systemone", "openjev-latest", joint_reads=True
+    )
+
+    async def exercise():
+        async with Client(joint, store=store, transport=httpx.MockTransport(fake)) as client:
+            first = await client.ask("s", QUESTIONS)
+            assert await client.ask("s", QUESTIONS) == first and len(fake.bodies) == 1
+            await client.ask("s", dict(reversed(QUESTIONS.items())))
+            assert len(fake.bodies) == 2  # the same questions in another order are another read
+            await client.ask("s", {"q": QUESTIONS["q"]})
+            assert len(fake.bodies) == 3  # and so is one of them alone
+            store.db.execute("DELETE FROM answers WHERE key = ?", (client.keys("s", QUESTIONS)["r"],))
+            await client.ask("s", QUESTIONS)
+            assert len(fake.bodies) == 4 and list(fake.bodies[-1]["questions"]) == ["q", "r"]
+            assert client.meter.cached == 1
+
+    run(exercise())
+    store.close()
+
+
 def test_callers_may_supply_their_own_answer_identity(tmp_path):
     fake = Fake()
     store = AnswerStore(tmp_path / "answers.sqlite")

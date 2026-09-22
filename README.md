@@ -10,7 +10,8 @@ for jgrep, jsort, jlink, jselect, and jcol.
 Each product remains a separate repository and package. This core imports none of them.
 Product adapters retain prompts, cache identities, reuse policies, budget policies, and public APIs.
 
-Version 0.1.0 is a **local development release**, not a published PyPI release.
+Version 0.1.0 is available on [PyPI](https://pypi.org/project/jevkit-runtime/0.1.0/)
+and as [GitHub release artifacts](https://github.com/keltokhy/jevkit-core/releases/tag/v0.1.0).
 Ordinary source edits in an editable core installation apply on the next run;
 already-running Python processes need to restart.
 
@@ -138,7 +139,7 @@ exhaustive equivalence proof.
 The core CI tests Python 3.10 and 3.13. The downstream workflow tests the exact
 core revision against all five consumer main branches in separate jobs, including
 wheel installs. Pull-request and main-push runs are enabled with the repository
-variable `JEVKIT_CONSUMERS_READY=true` after bootstrap. Manual dispatch can select
+variable `JEVKIT_CONSUMERS_READY=true`. Manual dispatch can select
 a common consumer branch/tag before then. All five consumer repositories are public.
 
 ## Release sequence
@@ -157,8 +158,8 @@ Before publishing any migrated consumer to PyPI:
 3. Release each consumer through its existing versioning/publishing process. Update
    its supported core range, lockfile, and CI core reference together on upgrades.
 
-Until the runtime distribution is available on PyPI, source development uses the
-sibling checkout. The cross-repository wheel checks install a freshly built core
+Source development uses the sibling checkout; standalone installs resolve the
+runtime from PyPI. The cross-repository wheel checks install a freshly built core
 wheel explicitly alongside each consumer. Existing published tool versions remain
-independent of this migration. Once the runtime is published, standalone source
-clones can use `uv sync --no-sources`; published wheels use ordinary dependencies.
+independent of this migration. Standalone source clones can use `uv sync --no-sources`; published wheels use
+ordinary dependencies.

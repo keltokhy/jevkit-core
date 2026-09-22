@@ -39,6 +39,14 @@ def python(repo):
     return repo / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
+def runtime_environment(executable, env=None):
+    """Use the selected environment for child CLI processes as well as Python."""
+    result = dict(os.environ if env is None else env)
+    result["PATH"] = os.pathsep.join((str(executable.parent), result.get("PATH", os.defpath)))
+    result["VIRTUAL_ENV"] = str(executable.parent.parent)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repos-root", type=Path, default=CORE.parent)
@@ -63,7 +71,11 @@ def main():
     if args.action == "run":
         repo = root / (args.name + args.suffix)
         arguments = args.arguments[1:] if args.arguments[:1] == ["--"] else args.arguments
-        command([python(repo), "-m", args.name, *arguments], cwd=Path.cwd())
+        command(
+            [python(repo), "-m", args.name, *arguments],
+            cwd=Path.cwd(),
+            env=runtime_environment(python(repo)),
+        )
         return
     for repo in repos.values():
         if not (repo / "pyproject.toml").is_file():
@@ -90,8 +102,9 @@ def main():
         env = environment(temp, args.tokenizer_cache)
         if args.action == "check":
             baselines = json.loads((CORE / "consumer-baselines.json").read_text())
-            command([python(CORE), "-m", "pytest", "-q"], env=env)
+            command([python(CORE), "-m", "pytest", "-q"], env=runtime_environment(python(CORE), env))
             for name, repo in repos.items():
+                consumer_env = runtime_environment(python(repo), env)
                 command(
                     [
                         python(repo),
@@ -105,9 +118,9 @@ def main():
                         baselines[name],
                     ],
                     cwd=temp,
-                    env=env,
+                    env=consumer_env,
                 )
-                command([python(repo), "-m", "pytest", "-q"], cwd=repo, env=env)
+                command([python(repo), "-m", "pytest", "-q"], cwd=repo, env=consumer_env)
             return
         wheels = temp / "wheels"
         command(["uv", "build", "--no-sources", "--out-dir", wheels])
@@ -119,6 +132,7 @@ def main():
             venv = temp / name
             command(["uv", "venv", "--python", python(repo), venv])
             executable = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            wheel_env = runtime_environment(executable, env)
             command(["uv", "pip", "install", "--python", executable, core_wheel, package])
             site = subprocess.check_output(
                 [str(executable), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"], text=True
@@ -132,12 +146,12 @@ def main():
                     Path(site) / "jevkit_core",
                 ],
                 cwd=temp,
-                env=env,
+                env=wheel_env,
             )
-            command([executable, "-m", name, "--version"], cwd=temp, env=env)
+            command([executable, "-m", name, "--version"], cwd=temp, env=wheel_env)
             if name == "jcol":
                 cli = venv / ("Scripts/jcol.exe" if os.name == "nt" else "bin/jcol")
-                command([executable, repo / "tests/test_process.py", cli], cwd=temp, env=env)
+                command([executable, repo / "tests/test_process.py", cli], cwd=temp, env=wheel_env)
                 command(
                     [
                         executable,
@@ -146,7 +160,7 @@ def main():
                         "assert files('jcol').joinpath('static/index.html').is_file()",
                     ],
                     cwd=temp,
-                    env=env,
+                    env=wheel_env,
                 )
             if name == "jlink":
                 command(
@@ -158,7 +172,7 @@ def main():
                         "for f in ('review.html', 'review.js', 'review.css'))",
                     ],
                     cwd=temp,
-                    env=env,
+                    env=wheel_env,
                 )
         print(json.dumps({"wheel_checks": names, "status": "passed"}))
 

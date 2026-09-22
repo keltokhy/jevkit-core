@@ -1,6 +1,14 @@
 import pytest
 
-from jevkit_core import Backend, JevError, JevFatal, answer_key, parse_answers, parse_usage, validate_answer
+from jevkit_runtime import (
+    Backend,
+    JevError,
+    JevFatal,
+    answer_key,
+    parse_answers,
+    parse_usage,
+    validate_answer,
+)
 
 BACKEND = Backend("typesafe", "https://one.invalid", "m")
 

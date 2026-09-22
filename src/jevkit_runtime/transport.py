@@ -43,8 +43,8 @@ async def post(
     delay: float = 0.2,
     jitter: float = 0.1,
     on_retry=None,
-) -> tuple[dict, float]:
-    """POST `body` and return the JSON object and the seconds the winning attempt took.
+) -> dict:
+    """POST `body` and return the JSON object it answers with.
 
     `timeout` bounds the whole call: every attempt, pause, and drip-fed body. Transport
     failures and retryable statuses are retried with backoff and Retry-After; other statuses
@@ -61,7 +61,6 @@ async def post(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        started = time.perf_counter()
         pause = delay * 2**attempt + random.random() * jitter
         try:
             response = await asyncio.wait_for(http.post(url, json=body, timeout=remaining), remaining)
@@ -75,7 +74,7 @@ async def post(
                 data = _json_object(response)
                 if data is None:
                     raise JevError(f"{provider} returned a response that is not a JSON object")
-                return data, time.perf_counter() - started
+                return data
             detail = error_detail(_json_object(response) or {}) or response.text[:200]
             if response.status_code in FATAL:
                 raise ProviderFatal(provider, response.status_code, detail)

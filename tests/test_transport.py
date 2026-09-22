@@ -4,7 +4,7 @@ import json
 import httpx
 import pytest
 
-from jevkit_core import JevError, JevFatal, ProviderStatus, RequestExhausted, post
+from jevkit_runtime import JevError, JevFatal, ProviderStatus, RequestExhausted, post
 
 
 def run(coroutine):
@@ -23,7 +23,7 @@ def test_retry_resends_the_same_request_and_counts_only_retries():
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(fake), headers={"Authorization": "Bearer test"}
         ) as http:
-            data, seconds = await post(
+            data = await post(
                 http,
                 "https://fixture.invalid/api",
                 body,
@@ -32,7 +32,6 @@ def test_retry_resends_the_same_request_and_counts_only_retries():
                 jitter=0,
                 on_retry=lambda: retries.append(1),
             )
-            assert seconds >= 0
             return data
 
     assert run(exercise()) == {"answers": {"q": {"noul": 0.7}}}
@@ -121,7 +120,7 @@ def test_retry_after_lengthens_the_pause_and_pauses_stay_within_the_deadline(mon
         calls.append(request)
         return httpx.Response(429, headers={"Retry-After": "0.75"})
 
-    monkeypatch.setattr("jevkit_core.transport.asyncio.sleep", sleep)
+    monkeypatch.setattr("jevkit_runtime.transport.asyncio.sleep", sleep)
 
     async def exercise(timeout):
         async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as http:

@@ -1,6 +1,6 @@
 # JevKit core
 
-Distribution **`jevkit-runtime`**, import **`jevkit_core`**. The PyPI name `jevkit-core` belongs
+Distribution **`jevkit-runtime`**, import **`jevkit_runtime`**. The PyPI name `jevkit-core` belongs
 to a different project.
 
 One request pipeline, one answer store, one provider catalog for jgrep, jsort, jlink, jselect,
@@ -10,7 +10,7 @@ tool's adapter is a few lines naming which providers it offers.
 ## What a tool gets
 
 ```python
-from jevkit_core import AnswerStore, Client, catalog, resolve
+from jevkit_runtime import AnswerStore, Client, catalog, resolve
 
 PROVIDERS = catalog("typesafe", "openrouter", "gateway")
 backend = resolve(PROVIDERS, name=None, model=None)          # or JEV_API / JEV_MODEL, else the first configured
@@ -21,14 +21,16 @@ async with Client(backend, store=AnswerStore()) as client:
 `Client.ask` does the whole thing: computes each question's identity, serves what the store already
 knows, joins an identical request already in flight, sends only the misses, validates the entire
 response before storing any of it, and meters the call before validation so a billed but malformed
-answer still counts. Per-call policy is keyword arguments: `allow_paid=False` for cache-only runs,
-`on_cost` for the caller who should be charged, `hedge_after` to resend a slow call, `provenance`
-to learn who answered each question, and `keys` for callers whose reuse unit is not the request.
+answer still counts. It returns `Answers`, a dict by question id whose `origins` say who answered
+each one and whether it came from the API, the store, or a shared call. Per-call policy is keyword
+arguments: `allow_paid=False` for cache-only runs, `on_cost` for the caller who should be charged,
+`hedge_after` to resend a slow call, and `keys` for callers whose reuse unit is not the request.
+HTTP/2 is used whenever the `http2` extra is installed.
 
 | Module | Owns |
 |---|---|
 | `settings.py` | Every environment and filesystem convention, read in one place: `XDG_*`, `JEV_API`, `JEV_URL`, `JEV_MODEL`, `JEV_PRICE_PER_MTOK`, provider keys and URL files |
-| `providers.py` | The catalog (`Provider`), a tool's selection of it, and `resolve()` to one `Backend`: endpoint, model, key |
+| `providers.py` | The catalog (`Provider`), a tool's selection of it or its own entries, and `resolve()` to one `Backend`: endpoint, model, key |
 | `protocol.py` | Request bodies, typed answer validation (`noul`, `choice`, `score`), usage parsing, answer identity, provenance |
 | `transport.py` | One HTTP call with a total deadline, retries with backoff and `Retry-After`, structured status errors |
 | `store.py` | SQLite answers with their provenance in one row, one versioned schema |

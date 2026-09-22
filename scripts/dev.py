@@ -57,8 +57,8 @@ def expect_core(executable, location, *, cwd, env):
         [
             executable,
             "-c",
-            "import sys, pathlib, jevkit_core; "
-            "here = pathlib.Path(jevkit_core.__file__).resolve().parent; "
+            "import sys, pathlib, jevkit_runtime; "
+            "here = pathlib.Path(jevkit_runtime.__file__).resolve().parent; "
             "assert here == pathlib.Path(sys.argv[1]).resolve(), here",
             location,
         ],
@@ -124,7 +124,7 @@ def main():
             command([python(CORE), "-m", "pytest", "-q"], env=runtime_environment(python(CORE), env))
             for repo in repos.values():
                 consumer_env = runtime_environment(python(repo), env)
-                expect_core(python(repo), CORE / "src/jevkit_core", cwd=temp, env=consumer_env)
+                expect_core(python(repo), CORE / "src/jevkit_runtime", cwd=temp, env=consumer_env)
                 command([python(repo), "-m", "pytest", "-q"], cwd=repo, env=consumer_env)
             return
         wheels = temp / "wheels"
@@ -142,7 +142,7 @@ def main():
             site = subprocess.check_output(
                 [str(executable), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"], text=True
             ).strip()
-            expect_core(executable, Path(site) / "jevkit_core", cwd=temp, env=wheel_env)
+            expect_core(executable, Path(site) / "jevkit_runtime", cwd=temp, env=wheel_env)
             command([executable, "-m", name, "--version"], cwd=temp, env=wheel_env)
             for asset in PACKAGED_ASSETS.get(name, []):
                 command(

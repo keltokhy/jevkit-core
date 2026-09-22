@@ -1,9 +1,11 @@
 import asyncio
+import json
 
 import httpx
 import pytest
 
-from jevkit_core import AnswerStore, Backend, Client, JevBudgetExceeded, JevError, JevFatal
+from jevkit_runtime import Answers, AnswerStore, Backend, Client, JevBudgetExceeded, JevError, JevFatal
+from jevkit_runtime import client as client_module
 
 BACKEND = Backend(
     "typesafe", "https://fixture.invalid/v1", "requested-alias", key="test-key", price_per_mtok=0.042
@@ -21,8 +23,6 @@ class Fake:
         self.answer = answer or (lambda qid: {"noul": 0.75})
 
     async def __call__(self, request):
-        import json
-
         body = json.loads(request.content)
         self.bodies.append(body)
         if self.delay:
@@ -46,18 +46,18 @@ def test_a_request_is_sent_once_then_answered_from_the_store(tmp_path):
 
     async def exercise():
         async with fake.client(store=store) as client:
-            origins = {}
-            first = await client.ask("évidence", QUESTIONS, provenance=origins)
-            assert first == {"q": {"noul": 0.75}, "r": {"noul": 0.75}}
+            first = await client.ask("évidence", QUESTIONS)
+            assert isinstance(first, Answers) and first == {"q": {"noul": 0.75}, "r": {"noul": 0.75}}
             assert fake.bodies == [{"model": "requested-alias", "state": "évidence", "questions": QUESTIONS}]
-            assert origins["q"]["source"] == "api" and origins["q"]["resolved_model"] == "resolved-v1"
+            origin = first.origins["q"]
+            assert (origin["source"], origin["resolved_model"]) == ("api", "resolved-v1")
+            assert (origin["provider"], origin["requested_model"]) == ("typesafe", "requested-alias")
+            again = await client.ask("évidence", QUESTIONS)
+            assert again == first
             assert (
-                origins["q"]["provider"] == "typesafe"
-                and origins["q"]["requested_model"] == "requested-alias"
+                again.origins["r"]["source"] == "cache"
+                and again.origins["r"]["resolved_model"] == "resolved-v1"
             )
-            again = {}
-            assert await client.ask("évidence", QUESTIONS, provenance=again) == first
-            assert again["r"]["source"] == "cache" and again["r"]["resolved_model"] == "resolved-v1"
             assert len(fake.bodies) == 1
             meter = client.meter
             assert (meter.calls, meter.cached, meter.input_tokens, meter.cost) == (1, 1, 100, 0.002)
@@ -77,11 +77,10 @@ def test_only_missing_questions_are_sent_and_cached_answers_are_validated(tmp_pa
     async def exercise():
         async with fake.client(store=store) as client:
             store.put(client.key("text", QUESTIONS["q"]), {"noul": 0.2})
-            origins = {}
-            answers = await client.ask("text", QUESTIONS, provenance=origins)
+            answers = await client.ask("text", QUESTIONS)
             assert answers == {"q": {"noul": 0.2}, "r": {"noul": 0.75}}
             assert list(fake.bodies[0]["questions"]) == ["r"]
-            assert origins["q"] == {"source": "cache"}
+            assert answers.origins["q"] == {"source": "cache"}
             assert client.meter.unknown_model_answers == 1 and client.meter.resolved_models == ["resolved-v1"]
             assert client.meter.model == ""
             store.put(client.key("text", QUESTIONS["q"]), {"noul": 2})
@@ -132,12 +131,13 @@ def test_one_owner_pays_and_a_cache_only_caller_can_join_the_flight():
         async with fake.client() as client:
             first = asyncio.create_task(client.ask("s", QUESTIONS, on_cost=charges[0].append))
             await asyncio.sleep(0.01)
-            origins = {}
             second = asyncio.create_task(
-                client.ask("s", QUESTIONS, allow_paid=False, on_cost=charges[1].append, provenance=origins)
+                client.ask("s", QUESTIONS, allow_paid=False, on_cost=charges[1].append)
             )
             assert await first == await second
-            assert len(fake.bodies) == 1 and origins["q"]["source"] == "shared"
+            assert len(fake.bodies) == 1
+            assert first.result().origins["q"]["source"] == "api"
+            assert second.result().origins["q"]["source"] == "shared"
             assert (client.meter.calls, client.meter.cached) == (1, 1)
             assert not client._flights
             with pytest.raises(JevBudgetExceeded):
@@ -233,3 +233,11 @@ def test_retries_are_counted_and_fatal_statuses_stop_at_once():
                 await client.ask("s", {"q": QUESTIONS["q"]})
 
     run(exercise())
+
+
+def test_http2_follows_the_installed_extra_and_never_applies_to_a_test_transport(monkeypatch):
+    monkeypatch.setattr(client_module, "http2_available", lambda: True)
+    assert Client(BACKEND).http2 is True
+    assert Client(BACKEND, transport=httpx.MockTransport(lambda request: httpx.Response(200))).http2 is False
+    monkeypatch.setattr(client_module, "http2_available", lambda: False)
+    assert Client(BACKEND).http2 is False

@@ -22,7 +22,6 @@ class Provider:
     url_env: str | None = None
     requires_key: bool = True
     auto_select: bool = True
-    price_per_mtok: float | None = None  # None: the run's list price
 
     def key_file(self, settings: Settings) -> Path:
         return settings.config_dir / f"{self.name}.key"
@@ -69,38 +68,21 @@ PROVIDERS = {
         "OPENROUTER_API_KEY",
     ),
     "gateway": Provider("gateway", "", "jev-latest", "JEV_GATEWAY_API_KEY", url_env="JEV_GATEWAY_URL"),
-    # Local servers are explicit opt-ins and never replace a configured hosted provider.
-    "diffusiongemma": Provider(
-        "diffusiongemma",
-        "http://127.0.0.1:8080/v1/systemone",
-        "openjev-latest",
-        "JEV_DIFFUSIONGEMMA_API_KEY",
-        url_env="JEV_DIFFUSIONGEMMA_URL",
-        requires_key=False,
-        auto_select=False,
-        price_per_mtok=0.0,
-    ),
-    "laya": Provider(
-        "laya",
-        "http://127.0.0.1:8081/v1/systemone",
-        "laya-421m",
-        "JEV_LAYA_API_KEY",
-        url_env="JEV_LAYA_URL",
-        requires_key=False,
-        auto_select=False,
-        price_per_mtok=0.0,
-    ),
 }
 
 
-def catalog(*names: str, models: dict[str, str] | None = None) -> dict[str, Provider]:
-    """A tool's providers in its priority order, with its own default models."""
+def catalog(*items: str | Provider, models: dict[str, str] | None = None) -> dict[str, Provider]:
+    """A tool's providers in its priority order, by catalog name or as its own definitions."""
+    providers: dict[str, Provider] = {}
+    for item in items:
+        provider = item if isinstance(item, Provider) else PROVIDERS.get(item)
+        if provider is None:
+            raise ValueError(f"unknown provider {item!r}")
+        providers[provider.name] = provider
     models = models or {}
-    if unknown := [name for name in names if name not in PROVIDERS]:
-        raise ValueError(f"unknown providers: {', '.join(unknown)}")
-    if unused := models.keys() - set(names):
+    if unused := models.keys() - providers.keys():
         raise ValueError(f"model overrides for unselected providers: {', '.join(sorted(unused))}")
-    return {name: replace(PROVIDERS[name], model=models.get(name, PROVIDERS[name].model)) for name in names}
+    return {name: replace(p, model=models.get(name, p.model)) for name, p in providers.items()}
 
 
 def resolve(
@@ -157,5 +139,6 @@ def _backend(provider: Provider, key: str, source: str, model: str | None, setti
         parsed = None
     if parsed is None or parsed.scheme not in ("http", "https") or not parsed.host:
         raise JevFatal(f"{provider.name} endpoint must be a complete HTTP or HTTPS URL, not {url!r}")
-    price = settings.price_per_mtok if provider.price_per_mtok is None else provider.price_per_mtok
-    return Backend(provider.name, url, model or settings.model or provider.model, key, source, price)
+    return Backend(
+        provider.name, url, model or settings.model or provider.model, key, source, settings.price_per_mtok
+    )

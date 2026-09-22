@@ -1,6 +1,6 @@
 import pytest
 
-from jevkit_core import PROVIDERS, JevFatal, Settings, catalog, resolve
+from jevkit_runtime import PROVIDERS, JevFatal, Provider, Settings, catalog, resolve
 
 
 @pytest.fixture(autouse=True)
@@ -45,7 +45,7 @@ def test_catalog_keeps_priority_and_isolates_model_overrides():
     assert list(selected) == ["openrouter", "typesafe"]
     assert selected["typesafe"].model == "pinned-v1"
     assert PROVIDERS["typesafe"].model == "jev-latest"
-    with pytest.raises(ValueError, match="unknown providers: typo"):
+    with pytest.raises(ValueError, match="unknown provider 'typo'"):
         catalog("typo")
     with pytest.raises(ValueError, match="unselected providers: gateway"):
         catalog("typesafe", models={"gateway": "pinned-v1"})
@@ -93,9 +93,14 @@ def test_gateway_needs_a_complete_endpoint(monkeypatch, tmp_path):
     assert resolve(providers, "gateway").url == "https://override.invalid/v1"
 
 
-def test_local_providers_are_keyless_and_never_auto_selected():
-    local = catalog("diffusiongemma", "laya")
+def test_a_tool_can_add_its_own_provider(monkeypatch):
+    local = Provider(
+        "local", "http://127.0.0.1:8080/v1", "local-v1", "LOCAL_KEY", requires_key=False, auto_select=False
+    )
+    providers = catalog("typesafe", local)
+    assert list(providers) == ["typesafe", "local"]
     with pytest.raises(JevFatal, match="no API key"):
-        resolve(local)
-    backend = resolve(local, "laya")
-    assert (backend.key, backend.price_per_mtok) == ("", 0.0)
+        resolve(providers)
+    monkeypatch.setenv("JEV_PRICE_PER_MTOK", "0")
+    backend = resolve(providers, "local")
+    assert (backend.key, backend.price_per_mtok, backend.url) == ("", 0.0, "http://127.0.0.1:8080/v1")

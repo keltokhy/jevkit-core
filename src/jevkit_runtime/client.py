@@ -1,8 +1,9 @@
-"""The request pipeline: identity, cache, sharing, transport, validation, storage, metering."""
+"""The request pipeline: identity, store, sharing, transport, validation, storage, metering."""
 
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 from collections.abc import Callable, Coroutine, Iterable, Mapping
 from typing import Any
 
@@ -26,6 +27,23 @@ from .store import AnswerStore
 Flight = tuple[dict[str, dict], dict]  # answers by key, and the origin they share
 
 
+class Answers(dict):
+    """Answers by question id, plus where each came from.
+
+    `origins[qid]` carries `provider`, `requested_model`, `resolved_model`, `answered_at`, and a
+    `source` of `cache`, `api`, or `shared`. An answer stored without provenance has only `source`.
+    """
+
+    def __init__(self, answers: Mapping[str, dict], origins: Mapping[str, dict]):
+        super().__init__(answers)
+        self.origins: dict[str, dict] = dict(origins)
+
+
+def http2_available() -> bool:
+    """HTTP/2 whenever the optional `h2` package is installed; the `http2` extra pulls it in."""
+    return importlib.util.find_spec("h2") is not None
+
+
 class Client:
     """Ask System One questions about a state. Every tool gets the same pipeline; policy is per call."""
 
@@ -38,11 +56,11 @@ class Client:
         concurrency: int = 32,
         store: AnswerStore | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
-        http2: bool = False,
     ):
         self.backend = backend
         self.timeout, self.attempts, self.store = timeout, attempts, store
-        self.concurrency, self.transport, self.http2 = concurrency, transport, http2
+        self.concurrency, self.transport = concurrency, transport
+        self.http2 = transport is None and http2_available()
         self.meter = Meter(provider=backend.name, requested_model=backend.model)
         self._flights: dict[str, asyncio.Task[Flight]] = {}
         self._http: httpx.AsyncClient | None = None
@@ -70,10 +88,7 @@ class Client:
                 )
             )
             self._http = httpx.AsyncClient(
-                headers=headers,
-                limits=limits,
-                transport=self.transport,
-                http2=self.http2 and self.transport is None,
+                headers=headers, limits=limits, transport=self.transport, http2=self.http2
             )
         return self._http
 
@@ -100,16 +115,13 @@ class Client:
         allow_paid: bool = True,
         on_cost: Callable[[float], None] | None = None,
         hedge_after: float | None = None,
-        provenance: dict | None = None,
-    ) -> dict[str, dict]:
+    ) -> Answers:
         """Answer every question, sending only those the store cannot answer.
 
         `keys` overrides the identity of each question for callers whose reuse unit is not the
         request. `allow_paid=False` still serves store hits and joins an in-flight request.
         `on_cost` is charged only by the caller whose request actually went out. `hedge_after`
-        sends a slow call a second time and keeps the first answer. `provenance`, if given,
-        receives each question's origin: provider, models, `answered_at`, and a `source` of
-        `cache`, `api`, or `shared`.
+        sends a slow call a second time and keeps the first answer.
         """
         keys = dict(keys) if keys is not None else {qid: self.key(state, q) for qid, q in questions.items()}
         answers: dict[str, dict] = {}
@@ -141,9 +153,7 @@ class Client:
                 origins[qid] = dict(origin) | {"source": "api" if owner else "shared"}
         for origin in origins.values():
             self.meter.note_answer(origin)
-        if provenance is not None:
-            provenance.update(origins)
-        return answers
+        return Answers({qid: answers[qid] for qid in questions}, {qid: origins[qid] for qid in questions})
 
     def _share(self, keys: Iterable[str], start: Callable[[], Coroutine[Any, Any, Flight]]):
         """Join an identical in-flight request, or start one. Only the starter pays."""
@@ -184,7 +194,7 @@ class Client:
         def retry():
             self.meter.retries += 1
 
-        data, seconds = await transport.post(
+        data = await transport.post(
             self.http,
             self.backend.url,
             request_body(self.backend.model, state, questions),
@@ -194,7 +204,7 @@ class Client:
             on_retry=retry,
         )
         usage = parse_usage(data.get("usage"), price_per_mtok=self.backend.price_per_mtok)
-        self.meter.record_call(usage, seconds, on_cost)
+        self.meter.record_call(usage, on_cost)
         answers = parse_answers(data, questions, provider=self.backend.name)
         origin = answer_origin(self.backend, resolved_model(data))
         if self.store is not None:

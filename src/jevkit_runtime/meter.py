@@ -19,13 +19,10 @@ class Meter:
     input_tokens: int = 0
     cost: float = 0.0
     max_call_cost: float = 0.0
-    latencies: list[float] = field(default_factory=list)
     cost_sources: dict[str, int] = field(default_factory=dict)
     answer_provenance: list[dict] = field(default_factory=list)
 
-    def record_call(
-        self, usage: Usage, seconds: float, on_cost: Callable[[float], None] | None = None
-    ) -> None:
+    def record_call(self, usage: Usage, on_cost: Callable[[float], None] | None = None) -> None:
         """Count a paid response before its answers are validated: an invalid answer was still billed."""
         self.calls += 1
         self.input_tokens += usage.tokens
@@ -34,7 +31,6 @@ class Meter:
         self.cost_sources[usage.source] = self.cost_sources.get(usage.source, 0) + 1
         if on_cost is not None:
             on_cost(usage.cost)
-        self.latencies.append(seconds)
 
     def note_answer(self, origin: dict) -> None:
         """Tally where each answer came from, so a run can say which models actually answered."""

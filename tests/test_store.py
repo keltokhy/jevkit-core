@@ -5,8 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from jevkit_core import AnswerStore, Entry, JevFatal
-from jevkit_core.store import SCHEMA_VERSION
+from jevkit_runtime import AnswerStore, Entry, JevFatal
+from jevkit_runtime.store import SCHEMA_VERSION
 
 
 def test_store_is_private_and_lives_under_xdg_cache_home(monkeypatch, tmp_path):

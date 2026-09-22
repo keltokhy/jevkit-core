@@ -1,6 +1,6 @@
 """Shared runtime for the JevKit tools: one pipeline, one store, one provider catalog."""
 
-from .client import Client
+from .client import Answers, Client
 from .errors import (
     JevBudgetExceeded,
     JevError,
@@ -30,6 +30,7 @@ from .transport import FATAL, RETRYABLE, post
 __version__ = "0.2.0"
 __all__ = [
     "AnswerStore",
+    "Answers",
     "Backend",
     "Client",
     "DEFAULT_PRICE_PER_MTOK",

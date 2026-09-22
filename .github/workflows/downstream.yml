@@ -14,8 +14,6 @@ permissions:
   contents: read
 jobs:
   consumers:
-    # Enabled after all five migration PRs land; manual runs remain available.
-    if: vars.JEVKIT_CONSUMERS_READY == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

@@ -68,8 +68,8 @@ python3 scripts/dev.py run jgrep -- --help
 
 `check` also proves each consumer imports this exact source tree; `wheel-check` proves the installed
 wheel, not the checkout. `--tool NAME` limits either to one consumer and `--suffix` selects
-alternatively named checkouts. The GitHub workflows run the core suite on Python 3.10 and 3.13 and,
-once `JEVKIT_CONSUMERS_READY` is set, the downstream matrix against each consumer's main branch.
+alternatively named checkouts. The GitHub workflows run the core suite on Python 3.10 and 3.13 and
+the downstream matrix against each consumer's main branch.
 
 ## Releasing
 

@@ -1,0 +1,39 @@
+name: downstream compatibility
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      consumer-ref:
+        description: Branch or tag available in all five migrated consumer repos
+        required: false
+        default: main
+        type: string
+permissions:
+  contents: read
+jobs:
+  consumers:
+    # Enabled after all five migration PRs land; manual runs remain available.
+    if: vars.JEVKIT_CONSUMERS_READY == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: [jgrep, jsort, jlink, jselect, jcol]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: jevkit-core
+      - uses: actions/checkout@v4
+        with:
+          repository: keltokhy/${{ matrix.tool }}
+          ref: ${{ inputs.consumer-ref || 'main' }}
+          path: ${{ matrix.tool }}
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: python jevkit-core/scripts/dev.py --tool ${{ matrix.tool }} setup
+      - run: python jevkit-core/scripts/dev.py --tool ${{ matrix.tool }} check
+      - run: python jevkit-core/scripts/dev.py --tool ${{ matrix.tool }} wheel-check

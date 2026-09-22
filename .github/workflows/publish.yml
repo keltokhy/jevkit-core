@@ -1,0 +1,33 @@
+name: publish
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Verified release tag to publish to PyPI
+        required: true
+        default: v0.1.0
+        type: string
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Verify the selected tag matches the package version
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: test "$RELEASE_TAG" = "v$(uv version --short)"
+      - run: uv sync --locked
+      - run: uv run ruff check src tests scripts
+      - run: uv run ruff format --check src tests scripts
+      - run: uv run pytest -q
+      - run: uv build --no-sources
+      - run: uv publish --trusted-publishing always

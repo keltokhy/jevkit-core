@@ -1,5 +1,5 @@
 [project]
-name = "jevkit-core"
+name = "jevkit-runtime"
 version = "0.1.0"
 description = "Shared transport, configuration, caching, and accounting for JevKit tools"
 readme = "README.md"
@@ -7,6 +7,10 @@ license = "MIT"
 authors = [{ name = "Khaled Eltokhy" }]
 requires-python = ">=3.10"
 dependencies = ["httpx>=0.27"]
+
+[project.urls]
+Homepage = "https://github.com/keltokhy/jevkit-core"
+Issues = "https://github.com/keltokhy/jevkit-core/issues"
 
 [project.optional-dependencies]
 http2 = ["httpx[http2]>=0.27"]

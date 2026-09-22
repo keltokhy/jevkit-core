@@ -1,17 +1,21 @@
 name: downstream compatibility
-# Enable on pull_request after migrated consumers have stable published refs.
-# During the bootstrap, dispatch with the common consumer migration branch.
 on:
+  pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       consumer-ref:
         description: Branch or tag available in all five migrated consumer repos
-        required: true
+        required: false
+        default: main
         type: string
 permissions:
   contents: read
 jobs:
   consumers:
+    # Enabled after all five migration PRs land; manual runs remain available.
+    if: vars.JEVKIT_CONSUMERS_READY == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -24,7 +28,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: keltokhy/${{ matrix.tool }}
-          ref: ${{ inputs.consumer-ref }}
+          ref: ${{ inputs.consumer-ref || 'main' }}
           path: ${{ matrix.tool }}
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v5

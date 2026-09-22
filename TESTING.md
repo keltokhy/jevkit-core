@@ -1,7 +1,7 @@
-# Local development validation — 2026-09-22
+# Validation record — 2026-09-22
 
-The five source baselines are recorded in `consumer-baselines.json`. No remote
-branches were fetched and no model inference was performed. Tests used mock
+The five source baselines are recorded in `consumer-baselines.json`. Bootstrap
+fetches verified current remote main branches. No model inference was performed. Tests used mock
 transports or local HTTP fixtures with outbound sockets blocked and model
 credentials removed. Dependency installation and public tokenizer preparation
 are separate from those inference-free checks.
@@ -10,13 +10,13 @@ are separate from those inference-free checks.
 |---|---|---|
 | jevkit-core | Python 3.13.15 | 44 passed |
 | jevkit-core | Python 3.10.21 | 44 passed |
-| jgrep | Python 3.12.14 | 299 passed |
+| jgrep | Python 3.12.14 | 282 passed |
 | jsort | Python 3.13.15 | 159 passed |
 | jlink | Python 3.12.14 | 720 passed |
 | jselect | Python 3.13.15 | 164 passed |
 | jcol | Python 3.12.14 | 138 passed, 3 existing warnings |
 
-The consumer total is 1,480. All existing consumer test files were retained
+The consumer total for the main-branch migrations is 1,463. All existing consumer test files were retained
 without modifying their assertions. The core now includes 17 additional tests
 for provider selection/model overrides, accounting callback order, unknown-model
 provenance, single-owner charges, cache-only sharing, task isolation, and cleanup
@@ -71,3 +71,25 @@ Release boundary: this validates the local development implementation and locall
 built packages. It does not establish live model quality, hosted CI status, or
 publication. The core remote/tag/package must be published before migrated consumer
 CI and public releases can resolve their pinned core dependency.
+
+
+## GitHub bootstrap
+
+The distribution is named `jevkit-runtime`: the PyPI project `jevkit-core` belongs
+to another developer. The repository remains `keltokhy/jevkit-core`, and Python
+imports remain `jevkit_core`. The five source overrides and lockfiles use the new
+distribution name. Wheel checks install the freshly built runtime explicitly.
+
+The jgrep PR is based on main (`7b2c867`), excluding the separate experimental
+backend and benchmark commits used in the first local exploration. Its 282-test main-branch suite passes; the earlier local 299-test run covered
+that experimental branch. The other four baselines are unchanged.
+
+All six repositories are public, so the hosted downstream matrix can check out
+all five consumers without extra repository credentials. The matrix is gated by
+`JEVKIT_CONSUMERS_READY` during the initial six-PR bootstrap, then enabled for
+future core pull requests and pushes. PyPI publishing is manually dispatched after
+Trusted Publishing is configured; Git tags alone do not publish a distribution.
+
+Bootstrap logs: `publish-setup.log`, `publish-check.log`, and `publish-wheels.log`
+in the same local report directory. The source-only jgrep migration, distribution
+rename, and installed wheel paths are verified again before merging.

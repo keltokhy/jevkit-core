@@ -111,7 +111,7 @@ def main():
             return
         wheels = temp / "wheels"
         command(["uv", "build", "--no-sources", "--out-dir", wheels])
-        core_wheel = next(wheels.glob("jevkit_core-*.whl"))
+        core_wheel = next(wheels.glob("jevkit_runtime-*.whl"))
         for name, repo in repos.items():
             destination = wheels / name
             command(["uv", "build", "--no-sources", "--out-dir", destination], cwd=repo)

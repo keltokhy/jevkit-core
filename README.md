@@ -1,5 +1,8 @@
 # JevKit core
 
+Distribution: **`jevkit-runtime`**. Python import: **`jevkit_core`**.
+The PyPI name `jevkit-core` belongs to a different project.
+
 Shared provider definitions, backend configuration, HTTP transport, retries, deadlines,
 SQLite answer storage, in-flight requests, usage accounting, and answer provenance
 for jgrep, jsort, jlink, jselect, and jcol.
@@ -14,18 +17,17 @@ already-running Python processes need to restart.
 ## Development
 
 Keep the six checkouts as siblings. Each consumer declares a normal versioned
-dependency on `jevkit-core` and a uv development override:
+dependency on `jevkit-runtime` and a uv development override:
 
 ```toml
 [tool.uv.sources]
-jevkit-core = { path = "../jevkit-core", editable = true }
+jevkit-runtime = { path = "../jevkit-core", editable = true }
 ```
 
-The current local migration uses `/Volumes/K3/GitHub/jevkit-core` and five isolated
-worktrees named `jgrep-jevkit`, `jsort-jevkit`, `jlink-jevkit`, `jselect-jevkit`, and
-`jcol-jevkit`. Their branches are `codex/jevkit-core`; the core branch is
-`codex/initial-core`. Original checkouts and globally installed commands have not
-been switched to these branches.
+Clone `keltokhy/jevkit-core` beside `keltokhy/jgrep`, `keltokhy/jsort`,
+`keltokhy/jlink`, `keltokhy/jselect`, and `keltokhy/jcol`. All six repositories
+remain independently versioned. For isolated development checkouts named
+`jgrep-jevkit` and so on, use the `--suffix=-jevkit` option shown below.
 
 From this directory:
 
@@ -74,8 +76,7 @@ Tool-specific meter fields remain in small subclasses.
 
 `backend_catalog` selects provider definitions in each tool's priority order and
 accepts model overrides. The four decision clients retain moving model aliases;
-jselect keeps its pinned defaults. Only jgrep enables the two experimental local
-providers. Adding a catalog entry does not automatically enable it in every tool.
+jselect keeps its pinned defaults. The catalog also defines two opt-in local providers; tools choose whether to expose them. Adding a catalog entry does not automatically enable it in every tool.
 
 `DecisionClient.share_request` returns a task and an ownership flag. It invokes a
 lazy request factory only for the owner, allowing jlink's cache-only callers to
@@ -108,7 +109,9 @@ tools. HTTP/2 is an optional core extra used by jcol.
 - jcol checkpoints and jselect's score cache remain separate from shared answer storage.
 - Budget meanings remain local: zero is unlimited for jgrep/jsort, cache-only for
   jlink, and rejected by jselect's semantic scorer. jcol retains its scheduler policy.
-- Experimental jgrep joint-read caching and keyless local backends are preserved.
+- The separate experimental jgrep branch retains joint-read caching and keyless
+  local backends. The main-branch migration exposes its original three providers;
+  unrelated experiments and benchmark graphics are not part of that migration.
 - All clients now use a true total HTTP deadline. jlink and jcol previously passed
   the remaining time only to httpx's individual network waits.
 - All five use validated usage parsing. Malformed, negative, nonfinite, or boolean
@@ -132,28 +135,30 @@ for all five, request sharing for the four decision clients, and provenance
 construction for jsort/jlink. It is a focused compatibility fixture, not an
 exhaustive equivalence proof.
 
-The core CI tests Python 3.10 and 3.13. The downstream workflow runs the exact core
-revision from the workflow against five specified consumer branches, each in its
-own job. During bootstrap it is manually dispatched with a branch/tag present in
-all five migrated repos; after publication it can be made a pull-request check
-using stable consumer refs. Hosted workflows have not been run for this local delivery.
+The core CI tests Python 3.10 and 3.13. The downstream workflow tests the exact
+core revision against all five consumer main branches in separate jobs, including
+wheel installs. Pull-request and main-push runs are enabled with the repository
+variable `JEVKIT_CONSUMERS_READY=true` after bootstrap. Manual dispatch can select
+a common consumer branch/tag before then. All five consumer repositories are public.
 
 ## Release sequence
 
 The five packages retain independent releases. Their wheels contain a dependency
-on `jevkit-core>=0.1.0,<0.2.0`, never a local source path; jcol requests the `http2` extra.
+on `jevkit-runtime>=0.1.0,<0.2.0`, never a local source path; jcol requests the `http2` extra.
 
-Before publishing any migrated consumer:
+Before publishing any migrated consumer to PyPI:
 
-1. Create the core remote, publish/tag the verified core as `v0.1.0`, and publish its
-   distribution to the intended package index.
-2. Publish the consumer migration branches and run downstream compatibility against
-   their exact refs. Consumer CI checks out the tagged core beside each consumer so
-   locked development sources resolve consistently.
+1. Merge and tag the verified core as `v0.1.0`. Consumer CI checks out this tag
+   beside its own source, so tests do not depend on PyPI publication timing.
+2. Configure a PyPI Trusted Publisher for `jevkit-runtime`, repository
+   `keltokhy/jevkit-core`, workflow `publish.yml`, environment `pypi`. Dispatch the
+   publish workflow with the verified release tag. Publishing is explicit; creating
+   a Git tag alone does not upload a package.
 3. Release each consumer through its existing versioning/publishing process. Update
-   its supported core range, lockfile, and CI core reference together on later upgrades.
+   its supported core range, lockfile, and CI core reference together on upgrades.
 
-Publishing, pushing, tagging, and changing global CLI installations are not part of
-the current local development setup. A standalone clone without a sibling core can
-use `uv sync --no-sources` once the required core release exists on the package index;
-that changes its local lockfile source. Published wheels use ordinary dependency resolution.
+Until the runtime distribution is available on PyPI, source development uses the
+sibling checkout. The cross-repository wheel checks install a freshly built core
+wheel explicitly alongside each consumer. Existing published tool versions remain
+independent of this migration. Once the runtime is published, standalone source
+clones can use `uv sync --no-sources`; published wheels use ordinary dependencies.

@@ -1,0 +1,35 @@
+name: downstream compatibility
+# Enable on pull_request after migrated consumers have stable published refs.
+# During the bootstrap, dispatch with the common consumer migration branch.
+on:
+  workflow_dispatch:
+    inputs:
+      consumer-ref:
+        description: Branch or tag available in all five migrated consumer repos
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  consumers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: [jgrep, jsort, jlink, jselect, jcol]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: jevkit-core
+      - uses: actions/checkout@v4
+        with:
+          repository: keltokhy/${{ matrix.tool }}
+          ref: ${{ inputs.consumer-ref }}
+          path: ${{ matrix.tool }}
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: python jevkit-core/scripts/dev.py --tool ${{ matrix.tool }} setup
+      - run: python jevkit-core/scripts/dev.py --tool ${{ matrix.tool }} check
+      - run: python jevkit-core/scripts/dev.py --tool ${{ matrix.tool }} wheel-check

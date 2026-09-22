@@ -1,0 +1,135 @@
+# JevKit core
+
+Shared backend configuration, HTTP transport, retries, deadlines, SQLite answer storage,
+validation, and usage accounting for jgrep, jsort, jlink, jselect, and jcol.
+
+Each product remains a separate repository and package. This core imports none of them.
+Product adapters retain prompts, cache identities, answer reuse, budget policies, and public APIs.
+
+Version 0.1.0 is a **local development release**, not a published PyPI release.
+Ordinary source edits in an editable core installation apply on the next run;
+already-running Python processes need to restart.
+
+## Development
+
+Keep the six checkouts as siblings. Each consumer declares a normal versioned
+dependency on `jevkit-core` and a uv development override:
+
+```toml
+[tool.uv.sources]
+jevkit-core = { path = "../jevkit-core", editable = true }
+```
+
+The current local migration uses `/Volumes/K3/GitHub/jevkit-core` and five isolated
+worktrees named `jgrep-jevkit`, `jsort-jevkit`, `jlink-jevkit`, `jselect-jevkit`, and
+`jcol-jevkit`. Their branches are `codex/jevkit-core`; the core branch is
+`codex/initial-core`. Original checkouts and globally installed commands have not
+been switched to these branches.
+
+From this directory:
+
+```bash
+python3 scripts/dev.py --suffix=-jevkit setup
+python3 scripts/dev.py --suffix=-jevkit check
+python3 scripts/dev.py --suffix=-jevkit wheel-check
+python3 scripts/dev.py --suffix=-jevkit run jgrep -- --help
+```
+
+`run` uses the selected worktree's virtual environment and preserves the caller's
+working directory. To use it with data, replace `--help` with the normal tool arguments.
+For ordinary unsuffixed clones, omit `--suffix`. `--repos-root` selects their parent;
+`--tool jgrep` limits setup and checks to one consumer.
+
+`setup` installs dependencies and prepares the public tiktoken encoding files needed
+by jselect. It performs no model inference. `check` runs each suite in its own
+environment, strips model credentials, isolates configuration/cache directories,
+and blocks outbound sockets while permitting local fake HTTP servers. It also proves
+that every consumer calls the shared transport and imports this exact source tree,
+and compares its fixture behavior to the commits in `consumer-baselines.json`.
+Those commits must be present locally; use a full clone or fetch that history.
+
+`wheel-check` builds the core and consumer wheels, installs each consumer alongside
+the core wheel in a separate temporary environment, and exercises model fixtures and
+CLI entry points outside the source trees. It also checks packaged browser/review assets
+and jcol's installed process workflow. Dependency installation may use the package index;
+inference checks stay offline.
+
+## Shared boundary
+
+| Module | Responsibility |
+|---|---|
+| `backends.py` | Credential/configuration lookup, backend capabilities, selection |
+| `transport.py` | HTTP requests, total deadlines, retries, JSON/error handling |
+| `client.py` | Client lifecycle, transport delegation, common answer validation |
+| `cache.py` | SQLite answer storage and atomic provenance writes, key serialization |
+| `usage.py` | Usage validation, reported/estimated costs, common meter |
+| `errors.py` | Shared failure types and structured request exhaustion |
+
+`DecisionClient` is an adapter base, not a complete standalone scoring SDK. Product
+adapters supply their own `ask` and `_record` contracts. jselect calls the shared
+transport directly while retaining its relevance batching, score cache, and statistics.
+Tool-specific meter fields remain in small subclasses.
+
+No product imports another product, and the core imports none of them. NumPy,
+pandas, SciPy, Polars, tokenizers, and browser dependencies stay in their owning
+tools. HTTP/2 is an optional core extra used by jcol.
+
+## Compatibility
+
+- Existing prompts, CLI flags, supported backend choices, cache-key bytes, and
+  saved project/scale/index formats are retained by the adapters.
+- Existing `~/.config/jev` and cache locations continue to work. No user cache or
+  credential files were opened or migrated during development.
+- Legacy answer keys remain explicitly tool-owned. The shared `answer_key` function
+  offers an opt-in, versioned provider/endpoint identity for future consumers; it
+  never falls back to an ambiguous legacy entry. In particular, jlink's existing
+  cross-backend cache behavior has not silently changed.
+- jcol checkpoints and jselect's score cache remain separate from shared answer storage.
+- Budget meanings remain local: zero is unlimited for jgrep/jsort, cache-only for
+  jlink, and rejected by jselect's semantic scorer. jcol retains its scheduler policy.
+- Experimental jgrep joint-read caching and keyless local backends are preserved.
+- All clients now use a true total HTTP deadline. jlink and jcol previously passed
+  the remaining time only to httpx's individual network waits.
+- All five use validated usage parsing. Malformed, negative, nonfinite, or boolean
+  usage values fail rather than corrupting accounting; jselect retains its
+  fractional-token and missing-token estimate policy.
+
+These last two points are deliberate hardening accompanying the extraction.
+The adapter tests remain the source of truth for each tool's external behavior.
+
+## Cross-repository validation
+
+```bash
+python3 scripts/dev.py --suffix=-jevkit check
+```
+
+For a before/after request, result, and metering comparison, use a consumer's
+environment with `scripts/probe_consumer.py TOOL --baseline-repo PATH --baseline-ref COMMIT`.
+The probe covers cold/warm caches, repeated requests, in-flight sharing, and typed
+jcol answers. It is a focused compatibility fixture, not an exhaustive equivalence proof.
+
+The core CI tests Python 3.10 and 3.13. The downstream workflow runs the exact core
+revision from the workflow against five specified consumer branches, each in its
+own job. During bootstrap it is manually dispatched with a branch/tag present in
+all five migrated repos; after publication it can be made a pull-request check
+using stable consumer refs. Hosted workflows have not been run for this local delivery.
+
+## Release sequence
+
+The five packages retain independent releases. Their wheels contain a dependency
+on `jevkit-core>=0.1.0,<0.2.0`, never a local source path; jcol requests the `http2` extra.
+
+Before publishing any migrated consumer:
+
+1. Create the core remote, publish/tag the verified core as `v0.1.0`, and publish its
+   distribution to the intended package index.
+2. Publish the consumer migration branches and run downstream compatibility against
+   their exact refs. Consumer CI checks out the tagged core beside each consumer so
+   locked development sources resolve consistently.
+3. Release each consumer through its existing versioning/publishing process. Update
+   its supported core range, lockfile, and CI core reference together on later upgrades.
+
+Publishing, pushing, tagging, and changing global CLI installations are not part of
+the current local development setup. A standalone clone without a sibling core can
+use `uv sync --no-sources` once the required core release exists on the package index;
+that changes its local lockfile source. Published wheels use ordinary dependency resolution.

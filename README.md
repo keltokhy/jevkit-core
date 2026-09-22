@@ -73,7 +73,7 @@ adapter the Laya guide starts.
 
 ## Development
 
-Keep the six checkouts as siblings. Each consumer depends on `jevkit-runtime>=0.2.0,<0.3.0` and
+Keep the six checkouts as siblings. Each consumer depends on `jevkit-runtime>=0.3.0,<0.4.0` and
 overrides it for development with `jevkit-runtime = { path = "../jevkit-core", editable = true }`
 under `[tool.uv.sources]`.
 

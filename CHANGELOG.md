@@ -3,6 +3,13 @@
 `jevkit-runtime` is 0.x: a minor version may break the API. The JevKit tools pin `<0.(n+1)` so a
 new minor release never changes an installed tool.
 
+## 0.3.1
+
+- Documentation and package metadata only; the code is the same as 0.3.0.
+- The DiffusionGemma and Laya guides report what to expect from the four tools' benchmarks.
+- Add this changelog and a security policy, and list the repository and changelog on PyPI.
+- README links point to GitHub, so they also work on PyPI.
+
 ## 0.3.0
 
 - Add the local decision servers `diffusiongemma` (OpenJev) and `laya` (laya-mlx) to the catalog.

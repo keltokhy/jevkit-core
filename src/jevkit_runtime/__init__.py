@@ -28,7 +28,7 @@ from .settings import DEFAULT_PRICE_PER_MTOK, Settings
 from .store import AnswerStore, Entry
 from .transport import FATAL, RETRYABLE, post
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 __all__ = [
     "AnswerStore",
     "Answers",

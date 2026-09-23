@@ -67,8 +67,8 @@ in place of a configured hosted provider, need no key, and are metered at zero A
 DiffusionGemma reads every question in a batch together, so the runtime keys each of its answers
 on the whole ordered batch and re-sends a batch whole when any slot is missing.
 
-No package ships the models. [docs/diffusiongemma.md](docs/diffusiongemma.md) and
-[docs/laya.md](docs/laya.md) explain how to run the servers, and `scripts/laya_server.py` is the
+No package ships the models. [docs/diffusiongemma.md](https://github.com/keltokhy/jevkit-core/blob/main/docs/diffusiongemma.md) and
+[docs/laya.md](https://github.com/keltokhy/jevkit-core/blob/main/docs/laya.md) explain how to run the servers, and `scripts/laya_server.py` is the
 adapter the Laya guide starts.
 
 ## Development

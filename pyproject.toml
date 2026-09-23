@@ -1,6 +1,6 @@
 [project]
 name = "jevkit-runtime"
-version = "0.3.0"
+version = "0.3.1"
 description = "Shared transport, configuration, caching, and accounting for JevKit tools"
 readme = "README.md"
 license = "MIT"

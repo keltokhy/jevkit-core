@@ -74,7 +74,20 @@ or a separate `XDG_CACHE_HOME`.
 
 ## What to expect
 
-A September 2026 jgrep experiment on an M3 Ultra found fast, strong short-text classification
-(92% top-1 on a news set) but weak precision on spam at the default 0.5 cutoff (53%, rising to
-79% at 0.9) and weak code judgments. Treat it as a fast classifier for short texts, and evaluate
-thresholds on your own labeled inputs before relying on the scores.
+On September 22, 2026, Laya (`laya-421m`) ran each tool's benchmarks on an Apple M3 Ultra with
+96 GiB of unified memory, beside Jev 1.13's recorded runs. It is a fast classifier of short texts
+into broad topics, and not a substitute for Jev elsewhere. In
+[jgrep](https://github.com/keltokhy/jgrep/blob/main/docs/benchmarks/local-models-2026-09-22.md)
+it had the best news accuracy of the three models, 92% against Jev's 87%, and finished 2,000
+messages in 46 s; at the default cutoff it also flagged 235 messages that were not spam, against
+Jev's 41. Its 512-token window, question included, decides what it can read: the adapter refuses
+longer requests with HTTP 422, which the tools report as failed decisions, so in
+[jcol](https://github.com/keltokhy/jcol/blob/main/benchmarks/README.md#local-models-2026-09-22)
+it refused 27 of 100 complaint narratives and in
+[jsort](https://github.com/keltokhy/jsort/blob/main/docs/benchmarks/local-models-2026-09-22.md)
+every whole FOMC statement. On what it could read, its pairwise comparisons in jsort did not
+follow Jev's order, and in
+[jlink](https://github.com/keltokhy/jlink/blob/main/docs/benchmarks/local-models-2026-09-22.md)
+it scored most candidate pairs as matches, for an F1 of 0.16 to 0.22 on firms, products and
+software where Jev's was 0.67 to 0.94. Evaluate thresholds on your own labeled inputs before
+relying on the scores.

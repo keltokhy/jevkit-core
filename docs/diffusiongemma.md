@@ -80,7 +80,19 @@ same URL and model, use `--no-cache` or a separate `XDG_CACHE_HOME`.
 
 ## What to expect
 
-A September 2026 jgrep comparison over 10,000 public-data decisions found news classification
-close to hosted Jev but more false positives on SMS spam at a 0.9 cutoff. For code, judge whole
-diff hunks or functions; isolated diff lines recalled poorly on a small synthetic fixture. Keep
-it experimental and evaluate its cutoff on your own data.
+On September 22, 2026, DiffusionGemma (`openjev-0.1`) ran each tool's benchmarks on an Apple M3
+Ultra with 96 GiB of unified memory, beside Jev 1.13's recorded runs. It is a reasonable
+substitute for Jev when the text must stay on your machine and each decision is about one record,
+or about long ones. In
+[jgrep](https://github.com/keltokhy/jgrep/blob/main/docs/benchmarks/local-models-2026-09-22.md)
+its spam F1 was 0.87 against Jev's 0.91, with the same news accuracy; in
+[jlink](https://github.com/keltokhy/jlink/blob/main/docs/benchmarks/local-models-2026-09-22.md)
+it came within 0.03 of Jev's F1 on four of five benchmarks; in
+[jcol](https://github.com/keltokhy/jcol/blob/main/benchmarks/README.md#local-models-2026-09-22)
+it agreed with the product label on 78 of 100 complaints against Jev's 75; and in
+[jsort](https://github.com/keltokhy/jsort/blob/main/docs/benchmarks/local-models-2026-09-22.md)
+its scores for whole FOMC statements correlated 0.89 with Jev's. It is not a substitute for
+sorting single short lines, where its comparisons had a reliability of 0.62 and 0.39 against
+Jev's 0.97 and 0.96, or for judging isolated diff lines. The server runs one call at a time on
+the GPU: about a third of a second per short record, and 14 to 18 minutes per 3,000 record pairs.
+Keep it experimental and evaluate its cutoff on your own data.

@@ -115,6 +115,22 @@ def test_local_servers_are_free_keyless_and_chosen_only_by_name(monkeypatch):
     assert resolve(providers, "laya").url == "http://gpu-box:8081/v1/systemone"
 
 
+def test_gliner_is_a_free_keyless_local_server_chosen_only_by_name(monkeypatch):
+    providers = catalog("typesafe", "gliner")
+    with pytest.raises(JevFatal, match="Set TYPESAFE_API_KEY, or put"):
+        resolve(providers)
+    gliner = resolve(providers, "gliner")
+    assert (gliner.url, gliner.model, gliner.key, gliner.price_per_mtok, gliner.joint_reads) == (
+        "http://127.0.0.1:8082/v1/systemone",
+        "gliner2.5-decide",
+        "",
+        0.0,
+        False,
+    )
+    monkeypatch.setenv("JEV_GLINER_URL", "http://gpu-box:8082/v1/systemone")
+    assert resolve(providers, "gliner").url == "http://gpu-box:8082/v1/systemone"
+
+
 def test_price_comes_from_the_environment_then_the_provider_then_the_list(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "key")
     monkeypatch.setenv("M_KEY", "key")

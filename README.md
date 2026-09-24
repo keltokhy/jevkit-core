@@ -56,20 +56,22 @@ HTTP/2 is used whenever the `http2` extra is installed.
 
 ## Local servers
 
-Two catalog entries point at System One servers on your own machine: `diffusiongemma`, an
-[OpenJev](https://github.com/razorback16/openjev) server on port 8080, and `laya`, a
-[laya-mlx](https://github.com/mizorewww/laya-mlx) server on port 8081. Every JevKit tool names
-them in its catalog, so `--api laya` or `JEV_API=laya` works everywhere. They are never chosen
+Three catalog entries point at System One servers on your own machine: `diffusiongemma`, an
+[OpenJev](https://github.com/razorback16/openjev) server on port 8080, `laya`, a
+[laya-mlx](https://github.com/mizorewww/laya-mlx) server on port 8081, and `gliner`, a
+[GLiNER2.5-Decide](https://huggingface.co/fastino/GLiNER2.5-Decide) server on port 8082. A tool that
+names them in its catalog accepts `--api laya` or `JEV_API=laya`. They are never chosen
 in place of a configured hosted provider, need no key, and are metered at zero API fees unless
-`JEV_PRICE_PER_MTOK` says otherwise. `JEV_LAYA_URL` and `JEV_DIFFUSIONGEMMA_URL`, or the matching
+`JEV_PRICE_PER_MTOK` says otherwise. `JEV_LAYA_URL`, `JEV_DIFFUSIONGEMMA_URL` and `JEV_GLINER_URL`, or the matching
 `.url` files, point at a server elsewhere.
 
 DiffusionGemma reads every question in a batch together, so the runtime keys each of its answers
 on the whole ordered batch and re-sends a batch whole when any slot is missing.
 
 No package ships the models. [docs/diffusiongemma.md](https://github.com/keltokhy/jevkit-core/blob/main/docs/diffusiongemma.md) and
-[docs/laya.md](https://github.com/keltokhy/jevkit-core/blob/main/docs/laya.md) explain how to run the servers, and `scripts/laya_server.py` is the
-adapter the Laya guide starts.
+[docs/laya.md](https://github.com/keltokhy/jevkit-core/blob/main/docs/laya.md) and
+[docs/gliner.md](https://github.com/keltokhy/jevkit-core/blob/main/docs/gliner.md) explain how to run the servers, and
+`scripts/laya_server.py` and `scripts/gliner_server.py` are the adapters those guides start.
 
 ## Development
 

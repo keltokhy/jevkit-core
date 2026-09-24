@@ -94,6 +94,16 @@ PROVIDERS = {
         auto_select=False,
         price_per_mtok=0.0,
     ),
+    "gliner": Provider(
+        "gliner",
+        "http://127.0.0.1:8082/v1/systemone",
+        "gliner2.5-decide",
+        "JEV_GLINER_API_KEY",
+        url_env="JEV_GLINER_URL",
+        requires_key=False,
+        auto_select=False,
+        price_per_mtok=0.0,
+    ),
 }
 
 

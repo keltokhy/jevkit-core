@@ -9,6 +9,7 @@ new minor release never changes an installed tool.
   chosen only by name, and priced at zero API fees.
 - `scripts/gliner_server.py` serves the model through `gliner2` as a System One endpoint, answering
   `noul`, `choice` and `score` questions; setup in `docs/gliner.md`.
+- `jevkit_runtime.__version__` reads the installed package version; it had stayed at 0.3.1.
 
 ## 0.3.1
 

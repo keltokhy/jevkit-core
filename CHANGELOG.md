@@ -3,7 +3,7 @@
 `jevkit-runtime` is 0.x: a minor version may break the API. The JevKit tools pin `<0.(n+1)` so a
 new minor release never changes an installed tool.
 
-## Unreleased
+## 0.3.2
 
 - Add the local decision server `gliner` (GLiNER2.5-Decide, port 8082) to the catalog: keyless,
   chosen only by name, and priced at zero API fees.

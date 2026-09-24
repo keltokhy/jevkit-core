@@ -3,6 +3,13 @@
 `jevkit-runtime` is 0.x: a minor version may break the API. The JevKit tools pin `<0.(n+1)` so a
 new minor release never changes an installed tool.
 
+## Unreleased
+
+- Add the local decision server `gliner` (GLiNER2.5-Decide, port 8082) to the catalog: keyless,
+  chosen only by name, and priced at zero API fees.
+- `scripts/gliner_server.py` serves the model through `gliner2` as a System One endpoint, answering
+  `noul`, `choice` and `score` questions; setup in `docs/gliner.md`.
+
 ## 0.3.1
 
 - Documentation and package metadata only; the code is the same as 0.3.0.

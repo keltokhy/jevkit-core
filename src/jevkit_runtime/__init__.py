@@ -1,5 +1,7 @@
 """Shared runtime for the JevKit tools: one pipeline, one store, one provider catalog."""
 
+from importlib.metadata import version
+
 from .client import Answers, Client
 from .errors import (
     JevBudgetExceeded,
@@ -28,7 +30,7 @@ from .settings import DEFAULT_PRICE_PER_MTOK, Settings
 from .store import AnswerStore, Entry
 from .transport import FATAL, RETRYABLE, post
 
-__version__ = "0.3.1"
+__version__ = version("jevkit-runtime")
 __all__ = [
     "AnswerStore",
     "Answers",

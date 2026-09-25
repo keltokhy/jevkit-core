@@ -6,6 +6,9 @@
             else: print(outcome.value)
             if enough: break          # leaving the block stops the reader and cancels what is in flight
 
+`finish()` is the gentler stop: nothing more is read, and what is already in hand is still judged and
+returned, as when a budget runs out but the records it has paid for should still print.
+
 `read(stop)` runs on a thread of its own, so a blocking source such as `tail -f` never stalls the event
 loop; it should return when `stop` is set. `judge(item)` is a coroutine. At most `concurrency` records
 are in hand at once, counting both those being judged and those whose results wait their turn, so a
@@ -58,7 +61,8 @@ class ordered_map(Generic[T, R]):  # noqa: N801 - used as a function
             raise ValueError("concurrency must be at least 1")
         self._read, self._judge, self._ordered, self._urgent = read, judge, ordered, urgent
         self._concurrency = concurrency
-        self.stop = threading.Event()
+        self.stop = threading.Event()  # the reader's signal to stop; set by finish() or on leaving the block
+        self._closed = False
 
     async def __aenter__(self) -> AsyncIterator[Outcome[T, R]]:
         self._loop = asyncio.get_running_loop()
@@ -75,7 +79,12 @@ class ordered_map(Generic[T, R]):  # noqa: N801 - used as a function
         self._results_gen = self._results()
         return self._results_gen
 
+    def finish(self) -> None:
+        """Read nothing more; the records already in hand are still judged and returned, then the stream ends."""
+        self.stop.set()
+
     async def __aexit__(self, *exc) -> None:
+        self._closed = True
         self.stop.set()
         await self._results_gen.aclose()
         if (put := self._put) is not None:
@@ -89,26 +98,28 @@ class ordered_map(Generic[T, R]):  # noqa: N801 - used as a function
 
     def _feed(self) -> None:
         def enqueue(item) -> bool:
-            if self.stop.is_set():
+            if self._closed:
                 return False
             try:
                 put = asyncio.run_coroutine_threadsafe(self._inbox.put(item), self._loop)
             except RuntimeError:  # the loop has closed under a reader that outlived the run
                 return False
             self._put = put
-            # Stopping may race with creating the put: whichever sees the other cancels it, so a full
+            # Closing may race with creating the put: whichever sees the other cancels it, so a full
             # queue can never strand this thread.
-            if self.stop.is_set():
+            if self._closed:
                 put.cancel()
             try:
                 put.result()
             except (FutureCancelled, RuntimeError):
                 return False
-            return not self.stop.is_set()
+            return not self._closed
 
         items = iter(self._read(self.stop))
         try:
             for item in items:
+                if self.stop.is_set():  # finish(): what was read before this is still judged
+                    break
                 if not enqueue(item):
                     return
         except Exception as error:  # a reader failure ends the stream as its last outcome

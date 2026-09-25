@@ -169,3 +169,25 @@ def test_an_urgent_error_comes_back_at_once_ahead_of_slow_records():
 
     first = run(exercise())
     assert first.item == 2 and isinstance(first.error, Stop)
+
+
+def test_finish_reads_nothing_more_but_returns_every_record_in_hand():
+    started = []
+
+    async def judge(n):
+        started.append(n)
+        await asyncio.sleep(0.02)
+        return n
+
+    async def exercise():
+        stream = ordered_map(reading(range(100)), judge, concurrency=4)
+        taken = []
+        async with stream as results:
+            async for outcome in results:
+                taken.append(outcome.value)
+                if outcome.value == 1:
+                    stream.finish()
+        return taken
+
+    taken = run(exercise())
+    assert taken == sorted(started) and taken[:2] == [0, 1] and len(taken) < 20

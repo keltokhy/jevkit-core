@@ -10,7 +10,7 @@ class JevFatal(Exception):
 
 
 class JevBudgetExceeded(Exception):
-    """No cached or in-flight answer exists and a new paid request is forbidden."""
+    """A new request does not fit in the budget; no stored or in-flight answer could stand in for it."""
 
 
 class ProviderStatus(Exception):
@@ -22,6 +22,9 @@ class ProviderStatus(Exception):
 
     def message(self) -> str:
         return f"HTTP {self.status}: {self.detail}"
+
+    def __reduce__(self):  # rebuilt from its fields, so it survives a trip between processes
+        return type(self), (self.provider, self.status, self.detail)
 
 
 class ProviderError(ProviderStatus, JevError):
@@ -41,3 +44,10 @@ class RequestExhausted(JevError):
     def __init__(self, timeout: float, last: str, *, timed_out: bool = False):
         self.timeout, self.last, self.timed_out = timeout, last, timed_out
         super().__init__(f"gave up after {timeout:g}s ({last})")
+
+    def __reduce__(self):
+        return _exhausted, (self.timeout, self.last, self.timed_out)
+
+
+def _exhausted(timeout: float, last: str, timed_out: bool) -> RequestExhausted:
+    return RequestExhausted(timeout, last, timed_out=timed_out)

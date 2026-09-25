@@ -47,7 +47,16 @@ def test_catalog_keeps_priority_and_isolates_model_overrides():
     selected = catalog("openrouter", "typesafe", models={"typesafe": "pinned-v1"})
     assert list(selected) == ["openrouter", "typesafe"]
     assert selected["typesafe"].model == "pinned-v1"
-    assert PROVIDERS["typesafe"].model == "jev-latest"
+    assert PROVIDERS["typesafe"].model == "jev-1.13.0"
+
+
+def test_hosted_jev_is_pinned_to_a_release_and_carries_its_limits():
+    for name in ("typesafe", "openrouter", "gateway"):
+        provider = PROVIDERS[name]
+        assert "latest" not in provider.model and "1.13" in provider.model
+        assert (provider.max_request_tokens, provider.max_read_tokens) == (64_000, 32_000)
+    for name in ("diffusiongemma", "laya", "gliner"):
+        assert PROVIDERS[name].max_request_tokens is None
     with pytest.raises(ValueError, match="unknown provider 'typo'"):
         catalog("typo")
     with pytest.raises(ValueError, match="unselected providers: gateway"):

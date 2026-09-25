@@ -6,33 +6,111 @@ import hashlib
 import json
 import math
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .errors import JevError, JevFatal
 from .providers import Backend
+from .question import Question
 
-ANSWER_KEY_VERSION = "jevkit/answer/v2"
+ANSWER_KEY_VERSION = "jevkit/answer/v3"
 
 
 def digest(parts) -> str:
-    return hashlib.sha256(json.dumps(parts, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    """In order: a state's fields and a question's options reach the model in the order they are written."""
+    return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()
 
 
-def answer_key(backend: Backend, state, question: dict) -> str:
-    """One identity for every tool: who answered, at which endpoint, with which model, asked what."""
-    return digest([ANSWER_KEY_VERSION, backend.name, backend.url, backend.model, state, question])
+def _who(backend: Backend, scope: str | None) -> list:
+    return [ANSWER_KEY_VERSION, backend.name, backend.url, backend.model, scope]
 
 
-def answer_keys(backend: Backend, state, questions: dict[str, dict]) -> dict[str, str]:
+def answer_key(backend: Backend, state, question: Question, *, scope: str | None = None) -> str:
+    """One identity for every tool: who answered, at which endpoint, with which model, asked what.
+
+    `scope` lets a tool keep its answers apart from others that ask the same; it is added to the key and
+    never replaces it.
+    """
+    return digest([*_who(backend, scope), state, question.body()])
+
+
+def answer_keys(
+    backend: Backend, state, questions: Mapping[str, Question], *, scope: str | None = None
+) -> dict[str, str]:
     """Each question's identity. Under joint reads it is the whole batch, which every answer depends on."""
     if not backend.joint_reads:
-        return {qid: answer_key(backend, state, question) for qid, question in questions.items()}
-    batch = list(questions.items())
-    return {qid: answer_key(backend, state, {"slot": qid, "batch": batch}) for qid in questions}
+        return {qid: answer_key(backend, state, q, scope=scope) for qid, q in questions.items()}
+    batch = [[qid, q.body()] for qid, q in questions.items()]
+    return {qid: digest([*_who(backend, scope), state, {"slot": qid, "batch": batch}]) for qid in questions}
 
 
-def request_body(model: str, state, questions: dict[str, dict]) -> dict:
-    return {"model": model, "state": state, "questions": questions}
+def packed_request(
+    call: list[tuple[str, object]], questions: Mapping[str, Question], *, prefix: str, context=None
+) -> tuple[dict[str, str], object, dict[str, Question]]:
+    """One packed call: its slots (slot -> item), its state, and its questions by `slot.qid`.
+
+    Items sit in slots `prefix` + position. Without a context the state is the slots themselves; with one
+    it is `{"context": context, "items": slots}`, so every item is read beside the same context.
+    """
+    slots = {f"{prefix}{position}": item for position, (item, _) in enumerate(call)}
+    items = {slot: state for slot, (_, state) in zip(slots, call, strict=True)}
+    state = items if context is None else {"context": context, "items": items}
+    return slots, state, {f"{slot}.{qid}": q.at(slot) for slot in slots for qid, q in questions.items()}
+
+
+def packed_keys(
+    backend: Backend,
+    calls: list[list[tuple[str, object]]],
+    questions: Mapping[str, Question],
+    *,
+    prefix: str,
+    context=None,
+    reuse: str,
+    width: int | None,
+    scope: str | None = None,
+) -> dict[str, dict[str, str]]:
+    """Each packed item's identity for each question: item -> question id -> key.
+
+    `calls` are the items in the calls that carry them, in order. Under `reuse="item"` an answer is keyed
+    on its item, its question, the questions asked beside it, the context and the widest a call may be
+    (`width`), wherever the item sits. Under `reuse="call"`, and always under joint reads, it is keyed on
+    its place in the whole call.
+    """
+    shape = {
+        "prefix": prefix,
+        "context": context,
+        "questions": [[qid, q.body()] for qid, q in questions.items()],
+    }
+    keys: dict[str, dict[str, str]] = {}
+    if reuse == "item" and not backend.joint_reads:
+        for call in calls:
+            for item, state in call:
+                keys[item] = {
+                    qid: digest([*_who(backend, scope), "packed-item", shape, width, state, qid])
+                    for qid in questions
+                }
+        return keys
+    for call in calls:
+        states = [state for _, state in call]
+        for slot, (item, _) in enumerate(call):
+            keys[item] = {
+                qid: digest([*_who(backend, scope), "packed-call", shape, states, slot, qid])
+                for qid in questions
+            }
+    return keys
+
+
+def request_body(model: str, state, questions: Mapping[str, Question]) -> dict:
+    return {"model": model, "state": state, "questions": {qid: q.body() for qid, q in questions.items()}}
+
+
+REQUEST_OVERHEAD_TOKENS = 270  # the server's own prompt around a request, as measured by the tools
+
+
+def estimate_tokens(body: dict) -> int:
+    """Input tokens a request will bill, near enough to budget for: a token per four UTF-8 bytes of its
+    JSON, plus the server's overhead."""
+    return math.ceil(len(json.dumps(body, ensure_ascii=False).encode()) / 4) + REQUEST_OVERHEAD_TOKENS
 
 
 def error_detail(data: dict) -> str:
@@ -59,66 +137,15 @@ def answer_origin(backend: Backend, resolved: str | None) -> dict:
     }
 
 
-def _probability(value) -> bool:
-    return (
-        not isinstance(value, bool)
-        and isinstance(value, (int, float))
-        and math.isfinite(value)
-        and 0 <= value <= 1
-    )
-
-
-def _confidence(answer: dict) -> None:
-    if (confidence := answer.get("confidence")) is not None and not _probability(confidence):
-        raise ValueError("confidence must be a probability from 0 to 1")
-
-
-def _noul(answer: dict) -> None:
-    if not _probability(answer.get("noul")):
-        raise ValueError("noul must be a probability from 0 to 1")
-
-
-def _choice(answer: dict) -> None:
-    if not isinstance(answer.get("choice"), str):
-        raise ValueError("choice must be a string")
-    probabilities = answer.get("probabilities")
-    if probabilities is not None and (
-        not isinstance(probabilities, dict)
-        or not all(isinstance(k, str) and _probability(v) for k, v in probabilities.items())
-    ):
-        raise ValueError("probabilities must map choices to probabilities from 0 to 1")
-    _confidence(answer)
-
-
-def _score(answer: dict) -> None:
-    score = answer.get("score")
-    if (
-        isinstance(score, bool)
-        or not isinstance(score, (int, float))
-        or not math.isfinite(score)
-        or score < 0
-    ):
-        raise ValueError("score must be a finite nonnegative number")
-    _confidence(answer)
-
-
-QUESTION_TYPES = {"noul": _noul, "choice": _choice, "score": _score}
-
-
-def validate_answer(qid: str, question: dict, answer) -> None:
-    """Shape and type only; option membership and scale bounds belong to the tool that asked."""
-    if not isinstance(answer, dict):
-        raise JevError(f"invalid answer returned for question {qid!r}: expected an object")
-    validate = QUESTION_TYPES.get(question.get("type"))
-    if validate is None:
-        return
+def validate_answer(qid: str, question: Question, answer) -> None:
+    """The whole answer, including options and bounds; a malformed one fails the request that brought it."""
     try:
-        validate(answer)
+        question.validate(answer)
     except ValueError as exc:
         raise JevError(f"invalid answer returned for question {qid!r}: {exc}") from None
 
 
-def parse_answers(data: dict, questions: dict[str, dict], *, provider: str) -> dict[str, dict]:
+def parse_answers(data: dict, questions: Mapping[str, Question], *, provider: str) -> dict[str, dict]:
     """Every asked question answered and well formed, or nothing; partial responses are errors."""
     answers = data.get("answers")
     if not isinstance(answers, dict):

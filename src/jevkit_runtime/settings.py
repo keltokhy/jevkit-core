@@ -23,6 +23,7 @@ class Settings:
     url: str | None = None
     model: str | None = None
     price_per_mtok: float | None = None  # JEV_PRICE_PER_MTOK when set; see list_price
+    budget: float | None = None  # JEV_BUDGET when set: dollars, or math.inf for "none"; else the tool decides
     environ: Mapping[str, str] = field(default_factory=lambda: os.environ, repr=False, compare=False)
 
     @classmethod
@@ -38,6 +39,19 @@ class Settings:
                 raise JevFatal(f"JEV_PRICE_PER_MTOK must be a number, not {raw_price!r}") from None
             if not math.isfinite(price) or price < 0:
                 raise JevFatal("JEV_PRICE_PER_MTOK must be finite and nonnegative")
+        raw_budget = env.get("JEV_BUDGET", "").strip().lower()
+        budget = None
+        if raw_budget in ("none", "unlimited"):
+            budget = math.inf
+        elif raw_budget:
+            try:
+                budget = float(raw_budget)
+            except ValueError:
+                raise JevFatal(
+                    f"JEV_BUDGET must be a number of dollars or none, not {raw_budget!r}"
+                ) from None
+            if not math.isfinite(budget) or budget < 0:
+                raise JevFatal("JEV_BUDGET must be a finite, nonnegative number of dollars, or none")
         return cls(
             config_dir=Path(env.get("XDG_CONFIG_HOME") or home / ".config") / "jev",
             cache_dir=Path(env.get("XDG_CACHE_HOME") or home / ".cache") / "jev",
@@ -45,6 +59,7 @@ class Settings:
             url=env.get("JEV_URL") or None,
             model=env.get("JEV_MODEL") or None,
             price_per_mtok=price,
+            budget=budget,
             environ=env,
         )
 

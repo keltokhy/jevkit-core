@@ -10,46 +10,93 @@ tool's adapter is a few lines naming which providers it offers.
 ## What a tool gets
 
 ```python
-from jevkit_runtime import AnswerStore, Client, catalog, resolve
+from jevkit_runtime import AnswerStore, Client, Noul, catalog, resolve
 
 PROVIDERS = catalog("typesafe", "openrouter", "gateway")
 backend = resolve(PROVIDERS, name=None, model=None)          # or JEV_API / JEV_MODEL, else the first configured
+question = Noul("The text fits this description: ...")
 async with Client(backend, store=AnswerStore()) as client:
-    answers = await client.ask(state, {"q": {"type": "noul", "instructions": "..."}})
+    answers = await client.ask(state, {"q": question})
+    p = question.value(answers["q"])
 ```
+
+Questions are typed: `Noul` (a probability), `Choice` (one of its options) and `Score` (a position
+on its levels). Each validates its whole answer, options and bounds included, and reads it with
+`value` and `confidence`; `text` is the instruction exactly as sent.
 
 `Client.ask` does the whole thing: computes each question's identity, serves what the store already
 knows, joins an identical request already in flight, sends only the misses, validates the entire
 response before storing any of it, and meters the call before validation so a billed but malformed
 answer still counts. It returns `Answers`, a dict by question id whose `origins` say who answered
 each one and whether it came from the API, the store, or a shared call. Per-call policy is keyword
-arguments: `allow_paid=False` for cache-only runs, `on_cost` for the caller who should be charged,
-`hedge_after` to resend a slow call, and `keys` for callers whose reuse unit is not the request.
-HTTP/2 is used whenever the `http2` extra is installed.
+arguments: `scope` to keep a tool's answers apart from others that ask the same, and `hedge_after`
+to resend a slow call. HTTP/2 is used whenever the `http2` extra is installed.
+
+Spending belongs to a `Budget` shared by the run, `Client(backend, budget=Budget(1.0))`. Before a
+request goes out it reserves the request's estimated price, at the dearest rate its backend has
+charged so far (1.5 times the list price until the first charge), and when the charge comes back it
+settles it. Reservations wait in line for money held elsewhere to come back, and one is refused with
+`JevBudgetExceeded` only when nothing is held and it still does not fit; the store and a request
+already in flight still answer. So requests in the air cannot overshoot the limit together; only a
+price rise mid-flight can, and `Budget.rises` counts it. `Budget(0)` allows only what costs nothing,
+`Budget.from_settings(default)` honours `JEV_BUDGET`, and `await budget.allot(amount)` sets money
+aside for a unit of work that must be done whole, whose requests pass `budget=share`.
+
+`ask` is `plan` then `send`. `Client.plan` reads the store without sending or writing anything: the
+hits, the misses, the request those would make, and whether it is over the provider's limits. An
+estimate is a plan; a tool that schedules its own requests plans first and sends later.
+
+`Client.ask_packed(items, questions, context=...)` asks each question about each of several items,
+packing items into as few calls as the provider's limits and `max_items` allow. Items sit in slots
+(`p0`, `p1`, ...) beside an optional shared context, and each question names its slot as `{slot}`.
+It returns `PackedAnswers` by item, with an item's failure in `errors[item]` rather than failing
+the rest. By default an answer is reused only in the same call, since an item's answer can move with
+the company it is read in; `reuse="item"` reuses it wherever the item turns up in a call of the same
+width. `plan_packed` shows the calls, hits and cost without sending, and `send_packed` sends them.
 
 | Module | Owns |
 |---|---|
-| `settings.py` | Every environment and filesystem convention, read in one place: `XDG_*`, `JEV_API`, `JEV_URL`, `JEV_MODEL`, `JEV_PRICE_PER_MTOK`, provider keys and URL files |
+| `settings.py` | Every environment and filesystem convention, read in one place: `XDG_*`, `JEV_API`, `JEV_URL`, `JEV_MODEL`, `JEV_PRICE_PER_MTOK`, `JEV_BUDGET`, provider keys and URL files |
 | `providers.py` | The catalog (`Provider`), a tool's selection of it or its own entries, and `resolve()` to one `Backend`: endpoint, model, key |
-| `protocol.py` | Request bodies, typed answer validation (`noul`, `choice`, `score`), usage parsing, answer identity, provenance |
+| `question.py` | `Noul`, `Choice` and `Score`: request bodies, full answer validation, reading answers |
+| `protocol.py` | Request bodies, answer identity (plain, joint and packed), usage parsing, provenance |
 | `transport.py` | One HTTP call with a total deadline, retries with backoff and `Retry-After`, structured status errors |
-| `store.py` | SQLite answers with their provenance in one row, one versioned schema |
-| `client.py` | The pipeline above, request sharing, hedging |
+| `budget.py` | `Budget`: reserve a request's estimated price before it goes out, settle its charge when it returns |
+| `store.py` | SQLite answers with their provenance in one row, one versioned schema; read-only for previews |
+| `client.py` | The pipeline above, plans, packed requests, request sharing, hedging |
+| `workers.py` | Sending processes behind `Client(workers=N)`: the client keeps identity, store, sharing, budget and meter; workers post and decode |
+| `run.py` | `Run` and its record: tool, backends, models that answered, questions as asked, usage, budget, inputs; `warnings` |
+| `stream.py` | `ordered_map`: judge records as a reader thread yields them, a bounded window at a time, results in input order; `open_text` |
+| `cli.py` | The flags every tool shares (`--api --model --budget --timeout -j --no-cache --stats`), help text from the catalog, the stats line, `run_sync` |
 | `meter.py` | Calls, cache hits, retries, hedges, tokens, cost, and which models actually answered |
 | `errors.py` | `JevError`, `JevFatal`, `JevBudgetExceeded`, `RequestExhausted`, `ProviderError`, `ProviderFatal` |
 
+Every run can say what it did. `Run(tool, version, inputs=fingerprint(texts))` at the start and
+`run.record(client)` at the end give one versioned JSON record: the backends, the models that answered
+and how often, each distinct question exactly as asked, calls, cache hits, tokens, cost, and the
+budget, with the tool's own settings under `fields`. `warnings(record)` names what a person should see,
+such as one requested model answered by several.
+
 ## Conventions every tool shares
 
-- **Answer identity** is `answer_key(backend, state, question)`: provider, endpoint, model, state and
-  question. An answer from one provider or model is never served for another.
-- **The store** lives at `$XDG_CACHE_HOME/jev/answers.sqlite` (default `~/.cache/jev`), is created
-  private to the user, and resets itself when it finds an older schema. Version 0.2 cannot read
-  caches written by 0.1 tools; the first run after upgrading re-asks.
+- **Answer identity** is `answer_key(backend, state, question, scope=...)`: provider, endpoint, model,
+  scope, state and question, in order. An answer from one provider or model is never served for another,
+  and a scope adds to the key without replacing it. A plan is sent only by the client that made it.
+- **Models are pinned.** Hosted Jev is requested as a concrete release (`jev-1.13.0`, or
+  `typesafe/jev-1.13` on OpenRouter), bumped deliberately in a release of this package, so a key names
+  the model that answers and a moved alias never mixes versions in one cache. `--model jev-latest`
+  asks for the alias. `Meter.mixed_models` names any requested model that more than one model answered.
+- **The store** lives at `$XDG_CACHE_HOME/jev/answers.v3.sqlite` (default `~/.cache/jev`), created
+  private to the user. Each schema has a file of its own, so tools on runtime 0.3 (`answers.sqlite`)
+  and 0.4 work side by side; the first run on 0.4 re-asks, and the old file can go once every tool
+  is on 0.4.
 - **Credentials** come from the provider's variable, then `$XDG_CONFIG_HOME/jev/<provider>.key`.
   Gateways take their URL from `JEV_GATEWAY_URL` or `<provider>.url`. `JEV_URL` overrides any endpoint.
 - **Metering** refuses malformed usage rather than under-counting; a response without a reported
   cost is priced from its tokens at the provider's price, zero for local servers, or the list price.
   `JEV_PRICE_PER_MTOK` overrides both.
+- **Flags** mean the same in every tool: `--budget none` is no limit and `--budget 0` spends nothing,
+  and `JEV_BUDGET` sets a budget for every tool at once.
 - **Errors** keep their wording across tools: a fatal status reads `PROVIDER said 401: detail`, a
   bad request reads `HTTP 400: detail`, and exhaustion reads `gave up after 15s (last failure)`.
   Both status errors carry `provider`, `status` and `detail` for tools that word or redact them.
@@ -75,7 +122,7 @@ No package ships the models. [docs/diffusiongemma.md](https://github.com/keltokh
 
 ## Development
 
-Keep the six checkouts as siblings. Each consumer depends on `jevkit-runtime>=0.3.0,<0.4.0` and
+Keep the six checkouts as siblings. Each consumer depends on `jevkit-runtime>=0.4.0,<0.5.0` and
 overrides it for development with `jevkit-runtime = { path = "../jevkit-core", editable = true }`
 under `[tool.uv.sources]`.
 

@@ -96,6 +96,8 @@ def test_mixed_models_and_refused_requests_are_warnings():
     found = warnings(record)
     assert len(found) == 1 and "answered by 2 models (v1, v2)" in found[0]
     assert record["budget"][0]["refused"] == 1
+    record["budget"][0] |= {"limit": 0.001, "spent": 0.002}
+    assert "spent $0.0020 against a $0.00 budget" in warnings(record)[1]
 
 
 def test_fingerprints_follow_order_and_content():

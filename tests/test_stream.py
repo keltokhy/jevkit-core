@@ -149,3 +149,23 @@ def test_open_text_drops_a_byte_order_mark_and_reads_a_stand_in_stdin(tmp_path, 
         assert stream.read() == "piped\n"
     with pytest.raises(ValueError):
         ordered_map(reading([]), None, concurrency=0)
+
+
+def test_an_urgent_error_comes_back_at_once_ahead_of_slow_records():
+    class Stop(Exception):
+        pass
+
+    async def judge(n):
+        if n == 0:
+            await asyncio.sleep(5)
+        if n == 2:
+            raise Stop("bad key")
+        return n
+
+    async def exercise():
+        async with ordered_map(reading(range(6)), judge, concurrency=4, urgent=(Stop,)) as results:
+            async for outcome in results:
+                return outcome
+
+    first = run(exercise())
+    assert first.item == 2 and isinstance(first.error, Stop)

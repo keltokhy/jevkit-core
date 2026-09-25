@@ -11,7 +11,8 @@ loop; it should return when `stop` is set. `judge(item)` is a coroutine. At most
 are in hand at once, counting both those being judged and those whose results wait their turn, so a
 slow record holds back only as much as the window allows. With `ordered=False` results come as they
 finish. An exception from `judge` comes back as that record's `error`; one from `read` comes back as a
-final outcome with no item.
+final outcome with no item. Exceptions of an `urgent` type, such as a bad key, come back at once, ahead of
+the records still waiting their turn, so a run can stop without waiting for a slow record first.
 """
 
 from __future__ import annotations
@@ -51,10 +52,11 @@ class ordered_map(Generic[T, R]):  # noqa: N801 - used as a function
         *,
         concurrency: int,
         ordered: bool = True,
+        urgent: tuple[type[BaseException], ...] = (),
     ):
         if concurrency < 1:
             raise ValueError("concurrency must be at least 1")
-        self._read, self._judge, self._ordered = read, judge, ordered
+        self._read, self._judge, self._ordered, self._urgent = read, judge, ordered, urgent
         self._concurrency = concurrency
         self.stop = threading.Event()
 
@@ -154,9 +156,13 @@ class ordered_map(Generic[T, R]):  # noqa: N801 - used as a function
             self._outbox.put_nowait(outcome)
             self._delivered += 1
         else:
+            if self._urgent and isinstance(outcome.error, self._urgent):
+                self._outbox.put_nowait(outcome)  # now, not in turn; its place in the order is left empty
+                outcome = None
             self._finished[n] = outcome
             while self._next in self._finished:
-                self._outbox.put_nowait(self._finished.pop(self._next))
+                if (waiting := self._finished.pop(self._next)) is not None:
+                    self._outbox.put_nowait(waiting)
                 self._next += 1
                 self._delivered += 1
         self._maybe_end()

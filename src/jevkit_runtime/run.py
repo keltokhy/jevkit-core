@@ -128,9 +128,17 @@ def _added(counts: Iterable[dict[str, int]]) -> dict[str, int]:
 
 def warnings(record: dict) -> list[str]:
     """What a person should be told that a tool would not otherwise say: a requested model that more than
-    one model answered. Budget stops and failures are the tool's to word."""
-    return [
+    one model answered, and spending past a limit, which happens only when a price rises mid-flight.
+    Budget stops and failures are the tool's to word."""
+    found = [
         f"{asked} was answered by {len(models)} models ({', '.join(models)}); "
         "clear the cache or pin one model to keep a run on one"
         for asked, models in record["mixed_models"].items()
     ]
+    for budget in record["budget"]:
+        if budget["limit"] is not None and budget["spent"] > budget["limit"] * (1 + 1e-9):
+            found.append(
+                f"spent ${budget['spent']:.4f} against a ${budget['limit']:.2f} budget: the price rose "
+                "above its estimate while requests were in the air"
+            )
+    return found

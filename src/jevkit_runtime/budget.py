@@ -8,6 +8,10 @@ in the air hold. So a budget is overshot only when a price rises while requests 
 
 The limit is the tool's to choose; `math.inf` is no limit, and 0 allows only answers that cost nothing:
 the store, a request already in flight, or a server that charges no fees.
+
+A unit of work that must be done whole or not at all, such as every comparison of one text, takes an
+allotment first: `with budget.allot(amount) as share:` sets `amount` aside, refusing when it does not
+fit, and requests sent with `budget=share` draw on it. What is left goes back when the share closes.
 """
 
 from __future__ import annotations
@@ -64,6 +68,8 @@ class Budget:
         self.rates: dict[str, float] = {}  # dollars per estimated token, the dearest each backend charged
         self.rises = 0
         self.refused = 0
+        self._parent: Budget | None = None
+        self._closing = False
 
     @classmethod
     def from_settings(cls, default: float, settings: Settings | None = None) -> Budget:
@@ -95,33 +101,90 @@ class Budget:
         learned = self.rates.get(_rate_key(backend))
         return learned if learned is not None else backend.price_per_mtok / 1e6 * MARGIN
 
-    def reserve(self, backend: Backend, tokens: int) -> Hold:
-        """Set aside the price of a request, or raise JevBudgetExceeded when it does not fit."""
-        rate = self._rate(backend)
-        amount = tokens * rate
+    def _refuse(self, amount: float, what: str) -> None:
         if amount > 0 and amount > self.remaining:
             self.refused += 1
             raise JevBudgetExceeded(
                 f"the ${self.limit:.2f} budget has ${self.remaining:.4f} left; "
-                f"the next request would need about ${amount:.4f}"
+                f"{what} would need about ${amount:.4f}"
             )
+
+    def reserve(self, backend: Backend, tokens: int) -> Hold:
+        """Set aside the price of a request, or raise JevBudgetExceeded when it does not fit."""
+        if self._closing:
+            raise ValueError("this share of the budget has been closed")
+        rate = self._rate(backend)
+        amount = tokens * rate
+        self._refuse(amount, "the next request")
         self.held += amount
         self._open += 1
         return Hold(self, backend, tokens, rate, amount)
 
+    def allot(self, amount: float) -> Budget:
+        """A share of this budget for one unit of work, or JevBudgetExceeded when `amount` does not fit.
+
+        Requests sent with `budget=share` draw on the share, share this budget's learned prices, and are
+        spending here too. Closing the share (or leaving its `with` block) returns what it did not use,
+        once its last request has settled.
+        """
+        if (
+            isinstance(amount, bool)
+            or not isinstance(amount, (int, float))
+            or math.isnan(amount)
+            or amount < 0
+        ):
+            raise ValueError("an allotment is a nonnegative number of dollars")
+        self._refuse(amount, "this allotment")
+        share = Budget(math.inf if self.unlimited else amount)
+        share.rates, share._parent = self.rates, self
+        if not self.unlimited:
+            self.held += amount
+        self._open += 1
+        return share
+
+    def close(self) -> None:
+        """Give an allotment's unused part back to its budget, now or when its last request settles."""
+        if self._parent is not None and not self._closing:
+            self._closing = True
+            if not self._open:
+                self._return()
+
+    def __enter__(self) -> Budget:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def _return(self) -> None:
+        parent = self._parent
+        parent._open -= 1
+        if parent.unlimited:
+            return
+        left = max(0.0, self.limit - self.spent)
+        parent.held = parent.held - left if parent._open else 0.0
+
     def _free(self, hold: Hold) -> None:
         self._open -= 1
         self.held = self.held - hold.amount if self._open else 0.0  # no drift once nothing is held
+        if self._closing and not self._open:
+            self._return()
 
     def _settle(self, hold: Hold, cost: float) -> None:
-        self._free(hold)
+        before = self.spent
         self.spent += cost
         if hold.tokens:
             charged = cost / hold.tokens
             if hold.rate and charged > RISE * hold.rate:
                 self.rises += 1
+                if self._parent is not None:
+                    self._parent.rises += 1
             key = _rate_key(hold.backend)
             self.rates[key] = max(self.rates.get(key, 0.0), charged)
+        if (parent := self._parent) is not None:
+            parent.spent += cost
+            if not parent.unlimited:  # what the share had set aside is spent, not held
+                parent.held -= min(cost, max(0.0, self.limit - before))
+        self._free(hold)
 
     def summary(self) -> str:
         if self.unlimited:

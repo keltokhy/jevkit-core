@@ -50,6 +50,8 @@ Part of the run-layer plan ([#14](https://github.com/keltokhy/jevkit-core/issues
   limit together. `Client(budget=...)` replaces `allow_paid=` and `on_cost=`; `Budget(0)` allows only
   what costs nothing. `JEV_BUDGET` (dollars, or `none`) overrides a tool's default. `Plan` carries the
   estimated `tokens` and `cost` of its request.
+  `budget.allot(amount)` sets money aside for a unit of work that must be done whole (every comparison
+  of one text), and `ask(..., budget=share)` draws on it; what it does not use goes back when it closes.
 - Answer keys are v3, and order-sensitive: a state's fields and a question's options are keyed in the
   order they are sent. The store is `answers.v3.sqlite`, beside 0.3's `answers.sqlite`, so tools on
   either runtime share a cache directory; the first run after upgrading re-asks.

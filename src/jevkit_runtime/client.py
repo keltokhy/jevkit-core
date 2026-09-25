@@ -291,23 +291,35 @@ class Client:
         scope: str | None = None,
         hedge_after: float | None = None,
         priority: bool = False,
+        budget: Budget | None = None,
     ) -> Answers:
         """Answer every question, sending only those the store cannot answer. `plan` and then `send`."""
         return await self.send(
-            self.plan(state, questions, scope=scope), hedge_after=hedge_after, priority=priority
+            self.plan(state, questions, scope=scope),
+            hedge_after=hedge_after,
+            priority=priority,
+            budget=budget,
         )
 
-    async def send(self, plan: Plan, *, hedge_after: float | None = None, priority: bool = False) -> Answers:
+    async def send(
+        self,
+        plan: Plan,
+        *,
+        hedge_after: float | None = None,
+        priority: bool = False,
+        budget: Budget | None = None,
+    ) -> Answers:
         """Complete a plan: join an identical request already in flight, or send its misses.
 
         A new request is sent only if its estimate fits the client's budget; otherwise JevBudgetExceeded,
         though store hits and a request already in flight still answer. Only the caller whose request goes
         out pays. `hedge_after` sends a slow call a second time, budget permitting, and keeps the first
-        answer. `priority` sends ahead of other work when the client has workers.
+        answer. `priority` sends ahead of other work when the client has workers. `budget` spends from
+        another budget than the client's, such as an allotment for one unit of work.
         """
-        return await self._send(plan, hedge_after, priority, note=True)
+        return await self._send(plan, hedge_after, priority, budget, note=True)
 
-    async def _send(self, plan: Plan, hedge_after, priority, *, note: bool) -> Answers:
+    async def _send(self, plan: Plan, hedge_after, priority, budget, *, note: bool) -> Answers:
         if plan.backend != self.identity:
             raise ValueError(
                 f"this plan was made for {plan.backend[0]} {plan.backend[2]}, not {self.backend.name}"
@@ -323,7 +335,9 @@ class Client:
         else:
             if plan.oversized:
                 raise JevError(plan.oversized)
-            fresh, owner = await self._fetch(plan.state, plan.misses, plan.keys, hedge_after, priority)
+            fresh, owner = await self._fetch(
+                plan.state, plan.misses, plan.keys, hedge_after, priority, budget or self.budget
+            )
             for qid, (answer, origin) in fresh.items():
                 answers[qid] = answer
                 origins[qid] = origin | {"source": "api" if owner else "shared"}
@@ -439,7 +453,12 @@ class Client:
         return kept, errors
 
     async def send_packed(
-        self, plan: PackedPlan, *, hedge_after: float | None = None, priority: bool = False
+        self,
+        plan: PackedPlan,
+        *,
+        hedge_after: float | None = None,
+        priority: bool = False,
+        budget: Budget | None = None,
     ) -> PackedAnswers:
         """Send a packed plan's calls together. A failed call's items get its error instead of answers;
         a fatal error stops the run and is raised once every call has finished."""
@@ -453,7 +472,7 @@ class Client:
         if not plan.calls:
             self.meter.cached += 1
         results = await asyncio.gather(
-            *(self._send(call.plan, hedge_after, priority, note=False) for call in plan.calls),
+            *(self._send(call.plan, hedge_after, priority, budget, note=False) for call in plan.calls),
             return_exceptions=True,
         )
         fatal = next(
@@ -493,25 +512,26 @@ class Client:
         scope: str | None = None,
         hedge_after: float | None = None,
         priority: bool = False,
+        budget: Budget | None = None,
     ) -> PackedAnswers:
         """Ask each question about each item, packed into as few calls as fit: `plan_packed`, then
         `send_packed`."""
         plan = self.plan_packed(
             items, questions, context=context, prefix=prefix, reuse=reuse, max_items=max_items, scope=scope
         )
-        return await self.send_packed(plan, hedge_after=hedge_after, priority=priority)
+        return await self.send_packed(plan, hedge_after=hedge_after, priority=priority, budget=budget)
 
     # ---- sending ----------------------------------------------------------------------------------
 
     async def _fetch(
-        self, state, questions: Mapping[str, Question], keys: Mapping[str, str], hedge_after, priority
+        self, state, questions: Mapping[str, Question], keys: Mapping[str, str], hedge_after, priority, budget
     ) -> tuple[dict[str, tuple[dict, dict]], bool]:
         """Answers for `questions` by id, each with its origin, and whether this caller sent the request."""
         send_keys = {qid: keys[qid] for qid in questions}
         body = request_body(self.backend.model, state, questions)
 
         def start() -> Coroutine[Any, Any, Flight]:
-            hold = self.budget.reserve(self.backend, estimate_tokens(body))  # raises when it does not fit
+            hold = budget.reserve(self.backend, estimate_tokens(body))  # raises when it does not fit
             return self._request(body, questions, send_keys, hold, priority)
 
         task, owner = self._share(send_keys.values(), start)
@@ -519,7 +539,9 @@ class Client:
             # Shielded: a caller that stops waiting must not cancel a request others share.
             by_key, origin = await asyncio.shield(task)
         else:
-            by_key, origin = await self._hedged(task, hedge_after, body, questions, send_keys, priority)
+            by_key, origin = await self._hedged(
+                task, hedge_after, body, questions, send_keys, priority, budget
+            )
         return {qid: (by_key[key], dict(origin)) for qid, key in send_keys.items()}, owner
 
     def _share(self, keys: Iterable[str], start: Callable[[], Coroutine[Any, Any, Flight]]):
@@ -538,12 +560,12 @@ class Client:
         task.add_done_callback(discard)
         return task, True
 
-    async def _hedged(self, first, after, body, questions, keys, priority) -> Flight:
+    async def _hedged(self, first, after, body, questions, keys, priority, budget) -> Flight:
         done, _ = await asyncio.wait({first}, timeout=after)
         if done:
             return first.result()
         try:
-            hold = self.budget.reserve(self.backend, estimate_tokens(body))
+            hold = budget.reserve(self.backend, estimate_tokens(body))
         except JevBudgetExceeded:
             return await asyncio.shield(first)  # no room for a second copy; wait for the first
         second = asyncio.ensure_future(self._request(body, questions, keys, hold, priority))

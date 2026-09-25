@@ -127,3 +127,50 @@ def test_jev_budget_overrides_a_tool_default():
     for bad in ("lots", "-1", "inf", "nan"):
         with pytest.raises(JevFatal, match="JEV_BUDGET"):
             Settings.from_env({"JEV_BUDGET": bad})
+
+
+def test_an_allotment_sets_money_aside_for_a_unit_of_work_and_returns_what_it_did_not_use():
+    parent = Budget(1.0)
+    share = parent.allot(0.4)
+    assert parent.held == pytest.approx(0.4) and parent.remaining == pytest.approx(0.6)
+    with pytest.raises(JevBudgetExceeded):
+        parent.allot(0.7)
+    assert parent.refused == 1
+    hold = share.reserve(HOSTED, 1000)
+    hold.settle(0.1)
+    assert (share.spent, parent.spent) == (pytest.approx(0.1), pytest.approx(0.1))
+    assert parent.held == pytest.approx(0.3)  # the share's spent part is spending, not held
+    assert share.rates is parent.rates and parent.rates
+    share.close()
+    assert parent.held == 0 and parent.remaining == pytest.approx(0.9)
+    with pytest.raises(ValueError, match="closed"):
+        share.reserve(HOSTED, 10)
+
+
+def test_a_share_closed_with_a_request_in_the_air_returns_its_rest_when_that_request_settles():
+    parent = Budget(1.0)
+    with parent.allot(0.5) as share:
+        hold = share.reserve(HOSTED, 1000)
+    assert parent.held == pytest.approx(0.5)  # still set aside: a request is in the air
+    hold.settle(0.6)  # a price rise: the request cost more than the share
+    assert parent.spent == pytest.approx(0.6) and parent.held == 0 and share.rises == parent.rises == 1
+    assert parent.remaining == pytest.approx(0.4)
+
+
+def test_sending_with_a_share_draws_on_it_and_an_unlimited_budget_allots_without_limit():
+    transport, bodies = answering(cost=0.001)
+
+    async def exercise():
+        parent = Budget(1.0)
+        async with Client(HOSTED, budget=parent, transport=transport) as client:
+            with parent.allot(0.01) as share:
+                await client.ask("s", Q, budget=share)
+            assert share.spent == 0.001 and parent.spent == 0.001 and parent.held == 0
+            tiny = parent.allot(0)
+            with pytest.raises(JevBudgetExceeded):
+                await client.ask("t", Q, budget=tiny)
+            tiny.close()
+        assert Budget().allot(5).unlimited
+
+    run(exercise())
+    assert len(bodies) == 1

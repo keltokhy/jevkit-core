@@ -80,7 +80,7 @@ class ordered_map(Generic[T, R]):  # noqa: N801 - used as a function
         return self._results_gen
 
     def finish(self) -> None:
-        """Read nothing more; the records already in hand are still judged and returned, then the stream ends."""
+        """Read nothing more; the records already in hand are still judged and returned."""
         self.stop.set()
 
     async def __aexit__(self, *exc) -> None:

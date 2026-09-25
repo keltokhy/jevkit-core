@@ -127,16 +127,10 @@ def _added(counts: Iterable[dict[str, int]]) -> dict[str, int]:
 
 
 def warnings(record: dict) -> list[str]:
-    """What a person should be told about a run's record: accidental model mixing, and refused requests."""
-    found = [
+    """What a person should be told that a tool would not otherwise say: a requested model that more than
+    one model answered. Budget stops and failures are the tool's to word."""
+    return [
         f"{asked} was answered by {len(models)} models ({', '.join(models)}); "
         "clear the cache or pin one model to keep a run on one"
         for asked, models in record["mixed_models"].items()
     ]
-    for budget in record["budget"]:
-        if budget["refused"]:
-            found.append(
-                f"the ${budget['limit']:.2f} budget turned away {budget['refused']:,} requests "
-                f"after ${budget['spent']:.4f}"
-            )
-    return found

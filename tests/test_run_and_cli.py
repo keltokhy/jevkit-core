@@ -94,7 +94,8 @@ def test_mixed_models_and_refused_requests_are_warnings():
     assert record["mixed_models"] == {} and len(record["budget"]) == 1  # each meter saw one model
     record["mixed_models"] = {"typesafe/jev-1.13.0": ["v1", "v2"]}
     found = warnings(record)
-    assert "answered by 2 models (v1, v2)" in found[0] and "turned away 1 requests" in found[1]
+    assert len(found) == 1 and "answered by 2 models (v1, v2)" in found[0]
+    assert record["budget"][0]["refused"] == 1
 
 
 def test_fingerprints_follow_order_and_content():

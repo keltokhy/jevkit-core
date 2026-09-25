@@ -202,14 +202,13 @@ def test_sending_with_a_share_draws_on_it_and_an_unlimited_budget_allots_without
             with await parent.allot(0.01) as share:
                 await client.ask("s", Q, budget=share)
             assert share.spent == 0.001 and parent.spent == 0.001 and parent.held == 0
-            tiny = await parent.allot(0)
-            with pytest.raises(JevBudgetExceeded):
-                await client.ask("t", Q, budget=tiny)
-            tiny.close()
+            with await parent.allot(0) as empty:
+                await client.ask("t", Q, budget=empty)  # an empty share draws on the budget's free money
+            assert parent.spent == pytest.approx(0.002) and parent.held == 0
         assert (await Budget().allot(5)).unlimited
 
     run(exercise())
-    assert len(bodies) == 1
+    assert len(bodies) == 2
 
 
 def test_a_share_guarantees_room_and_draws_on_what_the_budget_has_free_when_prices_rise():

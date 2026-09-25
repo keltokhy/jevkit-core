@@ -153,3 +153,14 @@ def test_run_sync_works_inside_a_running_loop():
 
     assert run_sync(inner()) == 7 and asyncio.run(outer()) == 7
     assert parse_budget("NONE") == math.inf
+
+
+def test_a_parser_hands_errors_back_and_help_survives_a_bad_override(monkeypatch):
+    from jevkit_runtime.cli import Parser, UsageError
+
+    ap = Parser(prog="jtool")
+    add_runtime_args(ap, PROVIDERS, default_budget=1.0)
+    with pytest.raises(UsageError, match="--budget"):
+        ap.parse_args(["--budget", "-1"])
+    monkeypatch.setenv("JEV_BUDGET", "lots")
+    assert "TYPESAFE_API_KEY" in providers_help(PROVIDERS)

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import math
+import os
 from collections.abc import Coroutine, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypeVar
@@ -24,11 +25,24 @@ import httpx
 
 from .budget import Budget
 from .client import Client
+from .errors import JevFatal
 from .providers import Provider, resolve
 from .settings import Settings
 from .store import AnswerStore
 
 T = TypeVar("T")
+
+
+class UsageError(Exception):
+    """A command line that does not parse; `Parser` raises it instead of printing and exiting."""
+
+
+class Parser(argparse.ArgumentParser):
+    """An ArgumentParser whose errors come back to the tool, which prints them where its `err` goes and
+    returns 2, rather than argparse writing to the real stderr and exiting mid-test."""
+
+    def error(self, message: str):
+        raise UsageError(message)
 
 
 def parse_budget(text: str) -> float:
@@ -114,7 +128,12 @@ def add_runtime_args(
 
 def providers_help(providers: Mapping[str, Provider], settings: Settings | None = None) -> str:
     """Where each provider's key and endpoint come from, for a tool's --help epilog."""
-    settings = settings or Settings.from_env()
+    if settings is None:
+        try:
+            settings = Settings.from_env()
+        except JevFatal:  # a malformed override must not stop --help from saying where keys live
+            unset = ("JEV_BUDGET", "JEV_PRICE_PER_MTOK")
+            settings = Settings.from_env({k: v for k, v in os.environ.items() if k not in unset})
     hosted = [p for p in providers.values() if p.requires_key]
     local = [p for p in providers.values() if not p.requires_key]
     lines = []

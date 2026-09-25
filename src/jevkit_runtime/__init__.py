@@ -29,6 +29,7 @@ from .protocol import (
 )
 from .providers import PROVIDERS, Backend, Provider, catalog, resolve
 from .question import Choice, Noul, Question, Score, from_body
+from .run import Run, fingerprint
 from .settings import DEFAULT_PRICE_PER_MTOK, Settings
 from .store import AnswerStore, Entry
 from .transport import FATAL, RETRYABLE, post
@@ -59,6 +60,7 @@ __all__ = [
     "Question",
     "RETRYABLE",
     "RequestExhausted",
+    "Run",
     "Score",
     "Settings",
     "Usage",
@@ -68,6 +70,7 @@ __all__ = [
     "digest",
     "error_detail",
     "estimate_tokens",
+    "fingerprint",
     "from_body",
     "packed_keys",
     "parse_answers",

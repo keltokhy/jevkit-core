@@ -219,6 +219,8 @@ class Client:
         out pays. `hedge_after` sends a slow call a second time, budget permitting, and keeps the first
         answer.
         """
+        for question in plan.questions.values():
+            self.meter.note_question(question)
         answers, origins = dict(plan.hits), dict(plan.origins)
         if not plan.misses:
             self.meter.cached += 1
@@ -260,6 +262,7 @@ class Client:
             raise ValueError(f"reuse must be one of {', '.join(REUSE)}")
         if max_items is not None and max_items < 1:
             raise ValueError("max_items must be at least 1")
+        self.meter.note_question(question)
         by_item = reuse == "item" and not self.backend.joint_reads
         entries = list(items.items())
         if by_item:

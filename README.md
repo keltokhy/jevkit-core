@@ -59,8 +59,16 @@ again; with `reuse="call"`, and always on a joint-read server, only in the same 
 | `budget.py` | `Budget`: reserve a request's estimated price before it goes out, settle its charge when it returns |
 | `store.py` | SQLite answers with their provenance in one row, one versioned schema; read-only for previews |
 | `client.py` | The pipeline above, plans, packed requests, request sharing, hedging |
+| `run.py` | `Run` and its record: tool, backends, models that answered, questions as asked, usage, budget, inputs; `warnings` |
+| `cli.py` | The flags every tool shares (`--api --model --budget --timeout -j --no-cache --stats`), help text from the catalog, the stats line, `run_sync` |
 | `meter.py` | Calls, cache hits, retries, hedges, tokens, cost, and which models actually answered |
 | `errors.py` | `JevError`, `JevFatal`, `JevBudgetExceeded`, `RequestExhausted`, `ProviderError`, `ProviderFatal` |
+
+Every run can say what it did. `Run(tool, version, inputs=fingerprint(texts))` at the start and
+`run.record(client)` at the end give one versioned JSON record: the backends, the models that answered
+and how often, each distinct question exactly as asked, calls, cache hits, tokens, cost, and the
+budget, with the tool's own settings under `fields`. `warnings(record)` names what a person should see,
+such as one requested model answered by several.
 
 ## Conventions every tool shares
 
@@ -79,6 +87,8 @@ again; with `reuse="call"`, and always on a joint-read server, only in the same 
 - **Metering** refuses malformed usage rather than under-counting; a response without a reported
   cost is priced from its tokens at the provider's price, zero for local servers, or the list price.
   `JEV_PRICE_PER_MTOK` overrides both.
+- **Flags** mean the same in every tool: `--budget none` is no limit and `--budget 0` spends nothing,
+  and `JEV_BUDGET` sets a budget for every tool at once.
 - **Errors** keep their wording across tools: a fatal status reads `PROVIDER said 401: detail`, a
   bad request reads `HTTP 400: detail`, and exhaustion reads `gave up after 15s (last failure)`.
   Both status errors carry `provider`, `status` and `detail` for tools that word or redact them.

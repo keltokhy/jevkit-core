@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .protocol import Usage
+from .protocol import Usage, digest
+from .question import Question
+
+QUESTIONS_LISTED = 100  # distinct questions a run record names in full
 
 
 @dataclass
@@ -20,6 +23,19 @@ class Meter:
     max_call_cost: float = 0.0
     cost_sources: dict[str, int] = field(default_factory=dict)
     answer_provenance: list[dict] = field(default_factory=list)
+    questions: dict[str, dict] = field(default_factory=dict)  # distinct questions asked, by digest of body
+    questions_not_listed: int = 0  # distinct questions past QUESTIONS_LISTED
+
+    def note_question(self, question: Question) -> None:
+        """Remember a question as it was written, so a run record can quote exactly what was asked."""
+        body = question.body()
+        key = digest(body)
+        if key in self.questions:
+            return
+        if len(self.questions) < QUESTIONS_LISTED:
+            self.questions[key] = body
+        else:
+            self.questions_not_listed += 1
 
     def record_call(self, usage: Usage) -> None:
         """Count a paid response before its answers are validated: an invalid answer was still billed."""

@@ -22,6 +22,14 @@ Part of the run-layer plan ([#14](https://github.com/keltokhy/jevkit-core/issues
   `jev-latest` alias, and `Meter.mixed_models` names a requested model that several models answered.
   ([#9](https://github.com/keltokhy/jevkit-core/issues/9))
 - A stored answer that no longer validates is asked again and overwritten, instead of failing the call.
+- `Run` records a run ([#10](https://github.com/keltokhy/jevkit-core/issues/10)): backends, the models
+  that answered, every distinct question as asked (the meter now notes them), usage, budget, an input
+  `fingerprint` and the tool's own `fields`, as versioned JSON; `run.warnings` names accidental model
+  mixing and refused requests.
+- `jevkit_runtime.cli` ([#11](https://github.com/keltokhy/jevkit-core/issues/11)): the flags every tool
+  shares, with `--budget none` for no limit and `--budget 0` for cache only; provider help generated
+  from the catalog (providers gain a `title`); `runtime_from_args`, `stats_line`, `show_stats`, and
+  `run_sync`, which runs a coroutine on its own thread inside a notebook's loop.
 - `Budget` owns spending ([#8](https://github.com/keltokhy/jevkit-core/issues/8)): each request reserves
   its estimated price (`estimate_tokens`, at the dearest rate charged so far, 1.5 times list price
   before the first charge) and settles its real charge, so concurrent requests cannot overshoot the

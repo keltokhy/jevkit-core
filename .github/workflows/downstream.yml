@@ -18,7 +18,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tool: [jgrep, jsort, jlink, jselect, jcol]
+        # jselect stays on runtime 0.3 until it moves onto 0.4 (keltokhy/jselect#5); it rejoins then.
+        tool: [jgrep, jsort, jlink, jcol]
     steps:
       - uses: actions/checkout@v4
         with:

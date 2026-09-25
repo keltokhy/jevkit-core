@@ -24,6 +24,10 @@ class Provider:
     auto_select: bool = True
     price_per_mtok: float | None = None  # when the server reports no cost; None means the list price
     joint_reads: bool = False  # every answer depends on the whole batch of questions, not on its own
+    # Request limits, in UTF-8 bytes of request JSON: an upper bound on tokens, with room for the server's
+    # own prompt. `max_read_bytes` bounds the state plus its longest question. None means not known.
+    max_request_bytes: int | None = None
+    max_read_bytes: int | None = None
 
     def key_file(self, settings: Settings) -> Path:
         return settings.config_dir / f"{self.name}.key"
@@ -58,19 +62,29 @@ class Backend:
     key_source: str = "none"
     price_per_mtok: float = DEFAULT_PRICE_PER_MTOK
     joint_reads: bool = False
+    max_request_bytes: int | None = None
+    max_read_bytes: int | None = None
 
 
+# TypeSafe documents 64k tokens per request and 32k for the state plus its longest question.
+JEV_LIMITS = {"max_request_bytes": 60_000, "max_read_bytes": 30_000}
+# Hosted providers are pinned to a concrete Jev release, so an answer's key names the model that gave it and
+# a moved alias never mixes versions in one cache. A release of this package bumps the pin deliberately;
+# `--model` (or JEV_MODEL) asks for an alias such as jev-latest instead.
 PROVIDERS = {
     "typesafe": Provider(
-        "typesafe", "https://api.typesafe.ai/v1/systemone", "jev-latest", "TYPESAFE_API_KEY"
+        "typesafe", "https://api.typesafe.ai/v1/systemone", "jev-1.13.0", "TYPESAFE_API_KEY", **JEV_LIMITS
     ),
     "openrouter": Provider(
         "openrouter",
         "https://openrouter.ai/api/alpha/decisions",
-        "~typesafe/jev-latest",
+        "typesafe/jev-1.13",
         "OPENROUTER_API_KEY",
+        **JEV_LIMITS,
     ),
-    "gateway": Provider("gateway", "", "jev-latest", "JEV_GATEWAY_API_KEY", url_env="JEV_GATEWAY_URL"),
+    "gateway": Provider(
+        "gateway", "", "jev-1.13.0", "JEV_GATEWAY_API_KEY", url_env="JEV_GATEWAY_URL", **JEV_LIMITS
+    ),
     # Local servers: chosen only by name, never in place of a configured hosted provider, and free
     # of API fees. The models run in their own processes; no JevKit package ships them.
     "diffusiongemma": Provider(
@@ -190,4 +204,6 @@ def _backend(provider: Provider, key: str, source: str, model: str | None, setti
         source,
         price,
         provider.joint_reads,
+        provider.max_request_bytes,
+        provider.max_read_bytes,
     )

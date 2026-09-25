@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from jevkit_runtime import from_body
 from jevkit_runtime.protocol import parse_answers
 
 spec = importlib.util.spec_from_file_location(
@@ -49,7 +50,8 @@ def test_each_question_is_its_own_task_and_answers_validate():
         }
     )
     answers = server.predict(model, {"subject": "Where is my parcel", "id": 7}, QUESTIONS)
-    parse_answers({"answers": answers}, QUESTIONS, provider="gliner")
+    typed = {qid: from_body(body) for qid, body in QUESTIONS.items()}
+    parse_answers({"answers": answers}, typed, provider="gliner")
     assert answers["spam"] == {"noul": 0.8}
     assert answers["topic"]["choice"] == "shipping"
     assert answers["topic"]["confidence"] == 0.7

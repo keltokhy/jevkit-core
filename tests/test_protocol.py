@@ -2,30 +2,39 @@ import pytest
 
 from jevkit_runtime import (
     Backend,
+    Choice,
     JevError,
     JevFatal,
+    Noul,
+    Score,
     answer_key,
     answer_keys,
+    from_body,
+    packed_keys,
     parse_answers,
     parse_usage,
     validate_answer,
 )
 
 BACKEND = Backend("typesafe", "https://one.invalid", "m")
+YES_NO = Choice("pick", ["yes", "no"])
+LEVELS = Score("rate", ["low", "mid", "high"])
 
 
-def test_answer_key_depends_on_who_answers_and_what_was_asked():
-    question = {"type": "noul", "instructions": "rule"}
+def test_answer_key_depends_on_who_answers_what_was_asked_and_the_scope():
+    question = Noul("rule")
     key = answer_key(BACKEND, "évidence", question)
-    assert key == answer_key(BACKEND, "évidence", dict(reversed(question.items())))
+    assert key == answer_key(BACKEND, "évidence", Noul("rule"))
     assert key != answer_key(Backend("openrouter", "https://one.invalid", "m"), "évidence", question)
     assert key != answer_key(Backend("typesafe", "https://two.invalid", "m"), "évidence", question)
     assert key != answer_key(Backend("typesafe", "https://one.invalid", "m2"), "évidence", question)
     assert key != answer_key(BACKEND, "évidence ", question)
+    assert key != answer_key(BACKEND, "évidence", Noul("rule", {"true": "t", "false": "f"}))
+    assert key != answer_key(BACKEND, "évidence", question, scope="tool/v1")
 
 
 def test_joint_reads_key_every_slot_on_the_whole_batch():
-    q = {"type": "noul", "instructions": "rule"}
+    q = Noul("rule")
     plain = answer_keys(BACKEND, "s", {"a": q, "b": q})
     assert plain == {"a": answer_key(BACKEND, "s", q), "b": answer_key(BACKEND, "s", q)}
     joint = Backend("typesafe", "https://one.invalid", "m", joint_reads=True)
@@ -36,16 +45,34 @@ def test_joint_reads_key_every_slot_on_the_whole_batch():
     assert answer_keys(joint, "s", {"a": q})["a"] != keys["a"]  # so is company
 
 
+def test_packed_items_are_keyed_alone_or_on_their_call():
+    q = Noul("{slot} is relevant")
+    calls = [[("a", "one"), ("b", "two")], [("c", "three")]]
+    alone = packed_keys(BACKEND, calls, q, prefix="p", reuse="item")
+    assert alone == packed_keys(
+        BACKEND, [[("a", "one")], [("c", "three"), ("b", "two")]], q, prefix="p", reuse="item"
+    )
+    assert alone["a"] != packed_keys(BACKEND, calls, q, prefix="r", reuse="item")["a"]
+    together = packed_keys(BACKEND, calls, q, prefix="p", reuse="call")
+    assert (
+        together["c"]
+        != packed_keys(BACKEND, [[("c", "three"), ("b", "two")]], q, prefix="p", reuse="call")["c"]
+    )
+    joint = Backend("typesafe", "https://one.invalid", "m", joint_reads=True)
+    assert packed_keys(joint, calls, q, prefix="p", reuse="item") == packed_keys(
+        joint, calls, q, prefix="p", reuse="call"
+    )
+
+
 @pytest.mark.parametrize(
     "question,answer",
     [
-        ({"type": "noul"}, {"noul": 0.5}),
-        ({"type": "noul"}, {"type": "noul", "noul": 1}),
-        ({"type": "choice"}, {"choice": "yes"}),
-        ({"type": "choice"}, {"choice": "yes", "probabilities": {"yes": 0.7, "no": 0.3}, "confidence": 0.9}),
-        ({"type": "score"}, {"score": 2, "confidence": 0.4}),
-        ({"type": "score"}, {"score": 0.5}),
-        ({"type": "future"}, {"anything": True}),
+        (Noul("x"), {"noul": 0.5}),
+        (Noul("x"), {"type": "noul", "noul": 1}),
+        (YES_NO, {"choice": "yes"}),
+        (YES_NO, {"choice": "yes", "probabilities": {"yes": 0.7, "no": 0.3}, "confidence": 0.9}),
+        (LEVELS, {"score": 2, "confidence": 0.4}),
+        (LEVELS, {"score": 0.5}),
     ],
 )
 def test_well_formed_answers_pass(question, answer):
@@ -55,17 +82,20 @@ def test_well_formed_answers_pass(question, answer):
 @pytest.mark.parametrize(
     "question,answer",
     [
-        ({"type": "noul"}, 0.5),
-        ({"type": "noul"}, {}),
-        ({"type": "noul"}, {"noul": True}),
-        ({"type": "noul"}, {"noul": 2}),
-        ({"type": "noul"}, {"noul": float("nan")}),
-        ({"type": "choice"}, {"choice": 3}),
-        ({"type": "choice"}, {"choice": "yes", "probabilities": {"yes": 1.5}}),
-        ({"type": "choice"}, {"choice": "yes", "confidence": -1}),
-        ({"type": "score"}, {"score": -1}),
-        ({"type": "score"}, {"score": "2"}),
-        ({"type": "score"}, {"score": 1, "confidence": 2}),
+        (Noul("x"), 0.5),
+        (Noul("x"), {}),
+        (Noul("x"), {"noul": True}),
+        (Noul("x"), {"noul": 2}),
+        (Noul("x"), {"noul": float("nan")}),
+        (YES_NO, {"choice": 3}),
+        (YES_NO, {"choice": "maybe"}),
+        (YES_NO, {"choice": "yes", "probabilities": {"yes": 1.5}}),
+        (YES_NO, {"choice": "yes", "probabilities": {"perhaps": 0.5}}),
+        (YES_NO, {"choice": "yes", "confidence": -1}),
+        (LEVELS, {"score": -1}),
+        (LEVELS, {"score": 3}),
+        (LEVELS, {"score": "2"}),
+        (LEVELS, {"score": 1, "confidence": 2}),
     ],
 )
 def test_malformed_answers_name_the_question(question, answer):
@@ -73,8 +103,24 @@ def test_malformed_answers_name_the_question(question, answer):
         validate_answer("q", question, answer)
 
 
+def test_questions_read_their_own_answers_and_round_trip_through_their_bodies():
+    assert Noul("x").value({"noul": 0.2}) == 0.2 and Noul("x").confidence({"noul": 0.2}) == 0.8
+    answer = {"choice": "no", "probabilities": {"yes": 0.4, "no": 0.6}}
+    assert (YES_NO.value(answer), YES_NO.confidence(answer)) == ("no", 0.6)
+    assert LEVELS.value({"score": 1}) == 1.0 and LEVELS.confidence({"score": 1}) is None
+    for question in (Noul("x", {"true": "t", "false": "f"}), YES_NO, LEVELS):
+        assert from_body(question.body()) == question and hash(from_body(question.body())) == hash(question)
+    assert Choice("pick", {"yes": "yes", "no": "no"}) == YES_NO
+    assert Noul("{slot} fits").at("p2").text == "p2 fits"
+    for bad in (lambda: Noul(" "), lambda: Choice("pick", ["only"]), lambda: Score("rate", ["one"])):
+        with pytest.raises(ValueError):
+            bad()
+    with pytest.raises(ValueError, match="unknown question type"):
+        from_body({"type": "future", "instructions": "x"})
+
+
 def test_partial_or_absent_answers_are_errors():
-    questions = {"a": {"type": "noul"}, "b": {"type": "noul"}}
+    questions = {"a": Noul("x"), "b": Noul("y")}
     with pytest.raises(JevError, match="fake returned no answers: rate limited"):
         parse_answers({"error": {"message": "rate limited"}}, questions, provider="fake")
     with pytest.raises(JevError, match="no answer returned for question 'b'"):

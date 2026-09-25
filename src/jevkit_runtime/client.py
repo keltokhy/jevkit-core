@@ -4,28 +4,31 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 from collections.abc import Callable, Coroutine, Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from . import transport
-from .errors import JevBudgetExceeded
+from .errors import JevBudgetExceeded, JevError
 from .meter import Meter
 from .protocol import (
-    answer_key,
     answer_keys,
     answer_origin,
+    packed_keys,
     parse_answers,
     parse_usage,
     request_body,
     resolved_model,
-    validate_answer,
 )
 from .providers import Backend
+from .question import Question
 from .store import AnswerStore
 
 Flight = tuple[dict[str, dict], dict]  # answers by key, and the origin they share
+REUSE = ("item", "call")
 
 
 class Answers(dict):
@@ -40,9 +43,31 @@ class Answers(dict):
         self.origins: dict[str, dict] = dict(origins)
 
 
+@dataclass(frozen=True)
+class Plan:
+    """What asking would do, read from the store without sending or writing anything."""
+
+    state: Any
+    questions: dict[str, Question]
+    keys: dict[str, str]
+    hits: dict[str, dict]  # answers the store already holds
+    origins: dict[str, dict]  # their provenance, each with source "cache"
+    misses: dict[str, Question]  # what a request would carry
+    request: dict | None  # the body it would send; None when nothing is missing
+    oversized: str | None  # why that request exceeds the provider's limits, if it does
+
+    @property
+    def complete(self) -> bool:
+        return not self.misses
+
+
 def http2_available() -> bool:
     """HTTP/2 whenever the optional `h2` package is installed; the `http2` extra pulls it in."""
     return importlib.util.find_spec("h2") is not None
+
+
+def _size(value) -> int:
+    return len(json.dumps(value, ensure_ascii=False).encode())
 
 
 class Client:
@@ -104,65 +129,235 @@ class Client:
     async def __aexit__(self, *exc) -> None:
         await self.close()
 
-    def key(self, state, question: dict) -> str:
-        return answer_key(self.backend, state, question)
+    # ---- planning ---------------------------------------------------------------------------------
 
-    def keys(self, state, questions: dict[str, dict]) -> dict[str, str]:
-        return answer_keys(self.backend, state, questions)
+    def plan(self, state, questions: Mapping[str, Question], *, scope: str | None = None) -> Plan:
+        """Which answers the store holds and what a request for the rest would be. No network, no writes.
+
+        A stored answer that no longer validates is a miss, asked again and overwritten. Under joint reads
+        the store serves the whole batch or none of it.
+        """
+        keys = answer_keys(self.backend, state, questions, scope=scope)
+        hits = self._stored(questions, keys)
+        if self.backend.joint_reads and len(hits) != len(questions):
+            hits = {}
+        misses = {qid: q for qid, q in questions.items() if qid not in hits}
+        request = request_body(self.backend.model, state, misses) if misses else None
+        return Plan(
+            state,
+            dict(questions),
+            keys,
+            {qid: answer for qid, (answer, _) in hits.items()},
+            {qid: origin for qid, (_, origin) in hits.items()},
+            misses,
+            request,
+            self._oversized(request),
+        )
+
+    def _stored(self, questions: Mapping[str, Question], keys: Mapping[str, str]) -> dict[str, tuple]:
+        found = {}
+        if self.store is None:
+            return found
+        for qid, question in questions.items():
+            entry = self.store.entry(keys[qid])
+            if entry is None:
+                continue
+            try:
+                question.validate(entry.answer)
+            except ValueError:
+                continue
+            found[qid] = (entry.answer, dict(entry.metadata or {}) | {"source": "cache"})
+        return found
+
+    def _oversized(self, request: dict | None) -> str | None:
+        if request is None:
+            return None
+        name, limit, read = self.backend.name, self.backend.max_request_bytes, self.backend.max_read_bytes
+        if limit is not None and (size := _size(request)) > limit:
+            return f"request of {size:,} bytes is over {name}'s limit of {limit:,}"
+        if read is not None and request["questions"]:
+            size = _size(request["state"]) + max(_size(q) for q in request["questions"].values())
+            if size > read:
+                return f"state and question of {size:,} bytes are over {name}'s limit of {read:,}"
+        return None
+
+    # ---- asking -----------------------------------------------------------------------------------
 
     async def ask(
         self,
         state,
-        questions: dict[str, dict],
+        questions: Mapping[str, Question],
         *,
-        keys: Mapping[str, str] | None = None,
+        scope: str | None = None,
         allow_paid: bool = True,
         on_cost: Callable[[float], None] | None = None,
         hedge_after: float | None = None,
     ) -> Answers:
-        """Answer every question, sending only those the store cannot answer.
+        """Answer every question, sending only those the store cannot answer. `plan` and then `send`."""
+        return await self.send(
+            self.plan(state, questions, scope=scope),
+            allow_paid=allow_paid,
+            on_cost=on_cost,
+            hedge_after=hedge_after,
+        )
 
-        `keys` overrides the identity of each question for callers whose reuse unit is not the
-        request. `allow_paid=False` still serves store hits and joins an in-flight request.
-        `on_cost` is charged only by the caller whose request actually went out. `hedge_after`
-        sends a slow call a second time and keeps the first answer.
+    async def send(
+        self,
+        plan: Plan,
+        *,
+        allow_paid: bool = True,
+        on_cost: Callable[[float], None] | None = None,
+        hedge_after: float | None = None,
+    ) -> Answers:
+        """Complete a plan: join an identical request already in flight, or send its misses.
+
+        `allow_paid=False` still serves store hits and joins an in-flight request. `on_cost` is charged
+        only by the caller whose request actually went out. `hedge_after` sends a slow call a second
+        time and keeps the first answer.
         """
-        keys = dict(keys) if keys is not None else self.keys(state, questions)
-        answers: dict[str, dict] = {}
-        origins: dict[str, dict] = {}
-        if self.store is not None:
-            for qid, question in questions.items():
-                if (entry := self.store.entry(keys[qid])) is not None:
-                    validate_answer(qid, question, entry.answer)
-                    answers[qid] = entry.answer
-                    origins[qid] = dict(entry.metadata or {}) | {"source": "cache"}
-        misses = {qid: q for qid, q in questions.items() if qid not in answers}
-        if misses and self.backend.joint_reads and len(misses) != len(questions):
-            # Each slot was answered in the light of the others; asking for some alone would change that.
-            answers.clear()
-            origins.clear()
-            misses = dict(questions)
-        if not misses:
+        answers, origins = dict(plan.hits), dict(plan.origins)
+        if not plan.misses:
             self.meter.cached += 1
         else:
-            miss_keys = {qid: keys[qid] for qid in misses}
-
-            def start() -> Coroutine[Any, Any, Flight]:
-                if not allow_paid:
-                    raise JevBudgetExceeded("a new paid request is not allowed by the budget")
-                return self._request(state, misses, miss_keys, on_cost)
-
-            task, owner = self._share(miss_keys.values(), start)
-            if hedge_after is None:
-                by_key, origin = await task
-            else:
-                by_key, origin = await self._hedged(task, hedge_after, state, misses, miss_keys, on_cost)
-            for qid, key in miss_keys.items():
-                answers[qid] = by_key[key]
-                origins[qid] = dict(origin) | {"source": "api" if owner else "shared"}
+            if plan.oversized:
+                raise JevError(plan.oversized)
+            fresh, owner = await self._fetch(
+                plan.state, plan.misses, plan.keys, allow_paid, on_cost, hedge_after
+            )
+            for qid, (answer, origin) in fresh.items():
+                answers[qid] = answer
+                origins[qid] = origin | {"source": "api" if owner else "shared"}
         for origin in origins.values():
             self.meter.note_answer(origin)
-        return Answers({qid: answers[qid] for qid in questions}, {qid: origins[qid] for qid in questions})
+        return Answers({q: answers[q] for q in plan.questions}, {q: origins[q] for q in plan.questions})
+
+    async def ask_packed(
+        self,
+        items: Mapping[str, Any],
+        question: Question,
+        *,
+        prefix: str = "p",
+        reuse: str = "item",
+        max_items: int | None = None,
+        scope: str | None = None,
+        allow_paid: bool = True,
+        on_cost: Callable[[float], None] | None = None,
+        hedge_after: float | None = None,
+    ) -> Answers:
+        """Ask one question about each of several items, packing items into as few calls as fit.
+
+        Each call's state holds its items in slots `prefix` + position, and `question` is asked once per
+        slot with `{slot}` filled in. Answers come back by item id.
+
+        `reuse="item"` keys each answer on its item and the question as written, so an item answered
+        in one call is served from the store in any other. `reuse="call"` keys it on its place in the
+        whole call, which is served whole or asked again whole; joint-read backends always use it.
+
+        Calls go out together. If one fails, its error is raised once every call has finished, and the
+        answers that did arrive are already stored.
+        """
+        if reuse not in REUSE:
+            raise ValueError(f"reuse must be one of {', '.join(REUSE)}")
+        if max_items is not None and max_items < 1:
+            raise ValueError("max_items must be at least 1")
+        by_item = reuse == "item" and not self.backend.joint_reads
+        entries = list(items.items())
+        if by_item:
+            keys = packed_keys(self.backend, [entries], question, prefix=prefix, reuse="item", scope=scope)
+            stored = self._stored(dict.fromkeys(items, question), keys)
+            first: dict[str, str] = {}  # an item whose key another item already carries is asked once
+            for item, _ in entries:
+                if item not in stored:
+                    first.setdefault(keys[item], item)
+            calls = self._calls([(i, items[i]) for i in first.values()], question, prefix, max_items)
+        else:
+            calls = self._calls(entries, question, prefix, max_items)
+            keys = packed_keys(self.backend, calls, question, prefix=prefix, reuse="call", scope=scope)
+            stored = self._stored(dict.fromkeys(items, question), keys)
+            whole = [call for call in calls if all(item in stored for item, _ in call)]
+            stored = {item: stored[item] for call in whole for item, _ in call}
+            calls = [call for call in calls if call not in whole]
+
+        answers = {item: answer for item, (answer, _) in stored.items()}
+        origins = {item: origin for item, (_, origin) in stored.items()}
+        if not calls:
+            self.meter.cached += 1
+        results = await asyncio.gather(
+            *(
+                self._packed_call(call, question, prefix, keys, allow_paid, on_cost, hedge_after)
+                for call in calls
+            ),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+            for item, (answer, origin) in result.items():
+                answers[item], origins[item] = answer, origin
+        if by_item:
+            for item, _ in entries:  # items that shared a key take the answer their twin was given
+                if item not in answers:
+                    twin = first[keys[item]]
+                    answers[item], origins[item] = answers[twin], origins[twin]
+        for item in items:
+            self.meter.note_answer(origins[item])
+        return Answers({i: answers[i] for i in items}, {i: origins[i] for i in items})
+
+    def _slots(self, call: list[tuple[str, Any]], question: Question, prefix: str):
+        slots = [f"{prefix}{position}" for position in range(len(call))]
+        state = {slot: item_state for slot, (_, item_state) in zip(slots, call, strict=True)}
+        return slots, state, {slot: question.at(slot) for slot in slots}
+
+    def _calls(self, entries, question: Question, prefix: str, max_items: int | None) -> list[list]:
+        """Items in order, in calls of at most `max_items` that each fit the provider's limits."""
+        calls: list[list] = []
+        for entry in entries:
+            if calls and (max_items is None or len(calls[-1]) < max_items):
+                _, state, questions = self._slots(calls[-1] + [entry], question, prefix)
+                if not self._oversized(request_body(self.backend.model, state, questions)):
+                    calls[-1].append(entry)
+                    continue
+            _, state, questions = self._slots([entry], question, prefix)
+            if reason := self._oversized(request_body(self.backend.model, state, questions)):
+                raise JevError(f"item {entry[0]!r} alone is too large: {reason}")
+            calls.append([entry])
+        return calls
+
+    async def _packed_call(self, call, question, prefix, keys, allow_paid, on_cost, hedge_after) -> dict:
+        slots, state, questions = self._slots(call, question, prefix)
+        slot_keys = {slot: keys[item] for slot, (item, _) in zip(slots, call, strict=True)}
+        fresh, owner = await self._fetch(state, questions, slot_keys, allow_paid, on_cost, hedge_after)
+        source = "api" if owner else "shared"
+        return {
+            item: (fresh[slot][0], fresh[slot][1] | {"source": source})
+            for slot, (item, _) in zip(slots, call, strict=True)
+        }
+
+    # ---- sending ----------------------------------------------------------------------------------
+
+    async def _fetch(
+        self,
+        state,
+        questions: Mapping[str, Question],
+        keys: Mapping[str, str],
+        allow_paid,
+        on_cost,
+        hedge_after,
+    ) -> tuple[dict[str, tuple[dict, dict]], bool]:
+        """Answers for `questions` by id, each with its origin, and whether this caller sent the request."""
+        send_keys = {qid: keys[qid] for qid in questions}
+
+        def start() -> Coroutine[Any, Any, Flight]:
+            if not allow_paid:
+                raise JevBudgetExceeded("a new paid request is not allowed by the budget")
+            return self._request(state, questions, send_keys, on_cost)
+
+        task, owner = self._share(send_keys.values(), start)
+        if hedge_after is None:
+            by_key, origin = await task
+        else:
+            by_key, origin = await self._hedged(task, hedge_after, state, questions, send_keys, on_cost)
+        return {qid: (by_key[key], dict(origin)) for qid, key in send_keys.items()}, owner
 
     def _share(self, keys: Iterable[str], start: Callable[[], Coroutine[Any, Any, Flight]]):
         """Join an identical in-flight request, or start one. Only the starter pays."""
@@ -199,7 +394,9 @@ class Client:
         assert error is not None
         raise error
 
-    async def _request(self, state, questions: dict[str, dict], keys: dict[str, str], on_cost) -> Flight:
+    async def _request(
+        self, state, questions: Mapping[str, Question], keys: Mapping[str, str], on_cost
+    ) -> Flight:
         def retry():
             self.meter.retries += 1
 

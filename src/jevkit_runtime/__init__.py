@@ -2,7 +2,7 @@
 
 from importlib.metadata import version
 
-from .client import Answers, Client
+from .client import Answers, Client, Plan
 from .errors import (
     JevBudgetExceeded,
     JevError,
@@ -14,18 +14,19 @@ from .errors import (
 )
 from .meter import Meter
 from .protocol import (
-    QUESTION_TYPES,
     Usage,
     answer_key,
     answer_keys,
     digest,
     error_detail,
+    packed_keys,
     parse_answers,
     parse_usage,
     request_body,
     validate_answer,
 )
 from .providers import PROVIDERS, Backend, Provider, catalog, resolve
+from .question import Choice, Noul, Question, Score, from_body
 from .settings import DEFAULT_PRICE_PER_MTOK, Settings
 from .store import AnswerStore, Entry
 from .transport import FATAL, RETRYABLE, post
@@ -35,6 +36,7 @@ __all__ = [
     "AnswerStore",
     "Answers",
     "Backend",
+    "Choice",
     "Client",
     "DEFAULT_PRICE_PER_MTOK",
     "Entry",
@@ -43,14 +45,17 @@ __all__ = [
     "JevError",
     "JevFatal",
     "Meter",
+    "Noul",
     "PROVIDERS",
+    "Plan",
     "ProviderError",
     "ProviderFatal",
     "ProviderStatus",
     "Provider",
-    "QUESTION_TYPES",
+    "Question",
     "RETRYABLE",
     "RequestExhausted",
+    "Score",
     "Settings",
     "Usage",
     "answer_key",
@@ -58,6 +63,8 @@ __all__ = [
     "catalog",
     "digest",
     "error_detail",
+    "from_body",
+    "packed_keys",
     "parse_answers",
     "parse_usage",
     "post",

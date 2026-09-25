@@ -13,7 +13,7 @@ from pathlib import Path
 from .errors import JevFatal
 from .settings import Settings
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3  # 3: answer keys v3 (typed questions, scopes, packed items)
 
 
 @dataclass(frozen=True)
@@ -24,13 +24,31 @@ class Entry:
 
 
 class AnswerStore:
-    """Thread-safe SQLite storage. Each row carries its answer and who produced it, written together."""
+    """Thread-safe SQLite storage. Each row carries its answer and who produced it, written together.
 
-    def __init__(self, path: Path | str | None = None, *, settings: Settings | None = None):
+    `read_only=True` opens an existing store without creating, migrating or writing it, for previews
+    and estimates; a missing store, or one of another schema, simply has no answers.
+    """
+
+    def __init__(
+        self, path: Path | str | None = None, *, settings: Settings | None = None, read_only: bool = False
+    ):
         self.path = Path(path) if path is not None else self.default_path(settings)
+        self.read_only = read_only
+        self._lock = threading.RLock()
+        if read_only:
+            self.db = None
+            if self.path.is_file():
+                db = sqlite3.connect(
+                    f"{self.path.resolve().as_uri()}?mode=ro", uri=True, check_same_thread=False
+                )
+                if db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION:
+                    self.db = db
+                else:
+                    db.close()
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path, timeout=30, isolation_level=None, check_same_thread=False)
-        self._lock = threading.RLock()
         try:
             os.chmod(self.path, 0o600)  # answers quote the caller's own text
         except OSError:
@@ -69,6 +87,8 @@ class AnswerStore:
         return entry.answer if entry is not None else None
 
     def entry(self, key: str) -> Entry | None:
+        if self.db is None:
+            return None
         with self._lock:
             row = self.db.execute("SELECT answer, metadata, at FROM answers WHERE key = ?", (key,)).fetchone()
         if row is None:
@@ -76,6 +96,8 @@ class AnswerStore:
         return Entry(json.loads(row[0]), json.loads(row[1]) if row[1] else None, row[2])
 
     def put(self, key: str, answer: dict, metadata: dict | None = None) -> None:
+        if self.read_only:
+            raise ValueError(f"{self.path} was opened read-only")
         values = (
             key,
             json.dumps(answer),
@@ -87,4 +109,5 @@ class AnswerStore:
 
     def close(self) -> None:
         with self._lock:
-            self.db.close()
+            if self.db is not None:
+                self.db.close()

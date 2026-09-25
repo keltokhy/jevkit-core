@@ -50,6 +50,19 @@ class Meter:
         return sum(p["count"] for p in self.answer_provenance if not p.get("resolved_model"))
 
     @property
+    def mixed_models(self) -> dict[str, list[str]]:
+        """Requested models that more than one model answered, by `provider/requested model`.
+
+        Asking one model and hearing from several is an accident, such as a cache that outlived an alias
+        moving to a new version, and a run should say so. Mixing on purpose, across providers, is not.
+        """
+        seen: dict[str, set[str]] = {}
+        for p in self.answer_provenance:
+            if p.get("resolved_model"):
+                seen.setdefault(f"{p['provider']}/{p['requested_model']}", set()).add(p["resolved_model"])
+        return {asked: sorted(models) for asked, models in seen.items() if len(models) > 1}
+
+    @property
     def model(self) -> str:
         """The one model that answered everything, or empty when answers are mixed or unattributed."""
         models = self.resolved_models

@@ -75,3 +75,24 @@ def test_concurrent_writers_keep_answer_and_origin_together(tmp_path):
     entry = store.entry("same")
     assert entry.answer["noul"] == entry.metadata["i"] / 100
     store.close()
+
+
+def test_a_read_only_store_never_creates_migrates_or_writes(tmp_path):
+    missing = AnswerStore(tmp_path / "none" / "answers.sqlite", read_only=True)
+    assert missing.get("k") is None and not (tmp_path / "none").exists()
+    path = tmp_path / "answers.sqlite"
+    store = AnswerStore(path)
+    store.put("k", {"noul": 0.7})
+    store.close()
+    reader = AnswerStore(path, read_only=True)
+    assert reader.get("k") == {"noul": 0.7}
+    with pytest.raises(ValueError, match="read-only"):
+        reader.put("k", {"noul": 0.1})
+    reader.close()
+    with sqlite3.connect(path) as db:
+        db.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+    older = AnswerStore(path, read_only=True)
+    assert older.get("k") is None
+    older.close()
+    with sqlite3.connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION - 1

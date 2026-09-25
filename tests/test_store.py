@@ -12,7 +12,7 @@ from jevkit_runtime.store import SCHEMA_VERSION
 def test_store_is_private_and_lives_under_xdg_cache_home(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     store = AnswerStore()
-    assert store.path == tmp_path / "jev" / "answers.sqlite"
+    assert store.path == tmp_path / "jev" / f"answers.v{SCHEMA_VERSION}.sqlite"
     assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
     store.close()
 
@@ -96,3 +96,9 @@ def test_a_read_only_store_never_creates_migrates_or_writes(tmp_path):
     older.close()
     with sqlite3.connect(path) as db:
         assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION - 1
+
+
+def test_a_file_that_is_not_a_store_reads_as_empty(tmp_path):
+    path = tmp_path / "answers.sqlite"
+    path.write_bytes(b"not a database at all" * 100)
+    assert AnswerStore(path, read_only=True).get("k") is None

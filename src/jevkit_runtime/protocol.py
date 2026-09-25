@@ -17,7 +17,8 @@ ANSWER_KEY_VERSION = "jevkit/answer/v3"
 
 
 def digest(parts) -> str:
-    return hashlib.sha256(json.dumps(parts, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    """In order: a state's fields and a question's options reach the model in the order they are written."""
+    return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()
 
 
 def _who(backend: Backend, scope: str | None) -> list:
@@ -43,35 +44,59 @@ def answer_keys(
     return {qid: digest([*_who(backend, scope), state, {"slot": qid, "batch": batch}]) for qid in questions}
 
 
+def packed_request(
+    call: list[tuple[str, object]], questions: Mapping[str, Question], *, prefix: str, context=None
+) -> tuple[dict[str, str], object, dict[str, Question]]:
+    """One packed call: its slots (slot -> item), its state, and its questions by `slot.qid`.
+
+    Items sit in slots `prefix` + position. Without a context the state is the slots themselves; with one
+    it is `{"context": context, "items": slots}`, so every item is read beside the same context.
+    """
+    slots = {f"{prefix}{position}": item for position, (item, _) in enumerate(call)}
+    items = {slot: state for slot, (_, state) in zip(slots, call, strict=True)}
+    state = items if context is None else {"context": context, "items": items}
+    return slots, state, {f"{slot}.{qid}": q.at(slot) for slot in slots for qid, q in questions.items()}
+
+
 def packed_keys(
     backend: Backend,
     calls: list[list[tuple[str, object]]],
-    question: Question,
+    questions: Mapping[str, Question],
     *,
     prefix: str,
+    context=None,
     reuse: str,
+    width: int | None,
     scope: str | None = None,
-) -> dict[str, str]:
-    """Each packed item's identity, by item id.
+) -> dict[str, dict[str, str]]:
+    """Each packed item's identity for each question: item -> question id -> key.
 
-    `calls` are the items in the calls that will carry them, in order, each in slot `prefix` + position.
-    Under `reuse="item"` an item's answer is keyed on the item and the question as written, wherever it
-    sits; under `reuse="call"`, and always under joint reads, on its place in the whole call.
+    `calls` are the items in the calls that carry them, in order. Under `reuse="item"` an answer is keyed
+    on its item, its question, the questions asked beside it, the context and the widest a call may be
+    (`width`), wherever the item sits. Under `reuse="call"`, and always under joint reads, it is keyed on
+    its place in the whole call.
     """
-    template = [prefix, question.body()]
+    shape = {
+        "prefix": prefix,
+        "context": context,
+        "questions": [[qid, q.body()] for qid, q in questions.items()],
+    }
+    keys: dict[str, dict[str, str]] = {}
     if reuse == "item" and not backend.joint_reads:
-        return {
-            item: digest([*_who(backend, scope), "packed", state, template])
-            for call in calls
-            for item, state in call
-        }
-    keys = {}
+        for call in calls:
+            for item, state in call:
+                keys[item] = {
+                    qid: digest([*_who(backend, scope), "packed-item", shape, width, state, qid])
+                    for qid in questions
+                }
+        return keys
     for call in calls:
-        items = [state for _, state in call]
+        states = [state for _, state in call]
         for slot, (item, _) in enumerate(call):
-            keys[item] = digest(
-                [*_who(backend, scope), "packed-call", {"slot": slot, "items": items}, template]
-            )
+            keys[item] = {
+                qid: digest([*_who(backend, scope), "packed-call", shape, states, slot, qid])
+                for qid in questions
+            }
     return keys
 
 

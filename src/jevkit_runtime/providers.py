@@ -24,10 +24,10 @@ class Provider:
     auto_select: bool = True
     price_per_mtok: float | None = None  # when the server reports no cost; None means the list price
     joint_reads: bool = False  # every answer depends on the whole batch of questions, not on its own
-    # Request limits, in UTF-8 bytes of request JSON: an upper bound on tokens, with room for the server's
-    # own prompt. `max_read_bytes` bounds the state plus its longest question. None means not known.
-    max_request_bytes: int | None = None
-    max_read_bytes: int | None = None
+    # Input-token limits, as the provider documents them: a whole request, and the state plus its longest
+    # question. None means not known.
+    max_request_tokens: int | None = None
+    max_read_tokens: int | None = None
     title: str = ""  # how help text names it
 
     def key_file(self, settings: Settings) -> Path:
@@ -63,12 +63,12 @@ class Backend:
     key_source: str = "none"
     price_per_mtok: float = DEFAULT_PRICE_PER_MTOK
     joint_reads: bool = False
-    max_request_bytes: int | None = None
-    max_read_bytes: int | None = None
+    max_request_tokens: int | None = None
+    max_read_tokens: int | None = None
 
 
 # TypeSafe documents 64k tokens per request and 32k for the state plus its longest question.
-JEV_LIMITS = {"max_request_bytes": 60_000, "max_read_bytes": 30_000}
+JEV_LIMITS = {"max_request_tokens": 64_000, "max_read_tokens": 32_000}
 # Hosted providers are pinned to a concrete Jev release, so an answer's key names the model that gave it and
 # a moved alias never mixes versions in one cache. A release of this package bumps the pin deliberately;
 # `--model` (or JEV_MODEL) asks for an alias such as jev-latest instead.
@@ -220,6 +220,6 @@ def _backend(provider: Provider, key: str, source: str, model: str | None, setti
         source,
         price,
         provider.joint_reads,
-        provider.max_request_bytes,
-        provider.max_read_bytes,
+        provider.max_request_tokens,
+        provider.max_read_tokens,
     )

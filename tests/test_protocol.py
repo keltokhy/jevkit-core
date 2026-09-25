@@ -6,6 +6,7 @@ from jevkit_runtime import (
     JevError,
     JevFatal,
     Noul,
+    Question,
     Score,
     answer_key,
     answer_keys,
@@ -46,21 +47,34 @@ def test_joint_reads_key_every_slot_on_the_whole_batch():
 
 
 def test_packed_items_are_keyed_alone_or_on_their_call():
-    q = Noul("{slot} is relevant")
+    q = {"rel": Noul("{slot} is relevant")}
     calls = [[("a", "one"), ("b", "two")], [("c", "three")]]
-    alone = packed_keys(BACKEND, calls, q, prefix="p", reuse="item")
-    assert alone == packed_keys(
-        BACKEND, [[("a", "one")], [("c", "three"), ("b", "two")]], q, prefix="p", reuse="item"
-    )
-    assert alone["a"] != packed_keys(BACKEND, calls, q, prefix="r", reuse="item")["a"]
-    together = packed_keys(BACKEND, calls, q, prefix="p", reuse="call")
+    shape = dict(prefix="p", context=None, width=2)
+    alone = packed_keys(BACKEND, calls, q, reuse="item", **shape)
+    moved = packed_keys(BACKEND, [[("a", "one")], [("c", "three"), ("b", "two")]], q, reuse="item", **shape)
+    assert alone == moved
+    assert alone["a"] != packed_keys(BACKEND, calls, q, reuse="item", **(shape | {"width": 8}))["a"]
+    assert alone["a"] != packed_keys(BACKEND, calls, q, reuse="item", **(shape | {"prefix": "r"}))["a"]
+    assert alone["a"] != packed_keys(BACKEND, calls, q, reuse="item", **(shape | {"context": "c"}))["a"]
+    more = q | {"late": Noul("{slot} is late")}
+    assert alone["a"]["rel"] != packed_keys(BACKEND, calls, more, reuse="item", **shape)["a"]["rel"]
+    together = packed_keys(BACKEND, calls, q, reuse="call", **shape)
     assert (
-        together["c"]
-        != packed_keys(BACKEND, [[("c", "three"), ("b", "two")]], q, prefix="p", reuse="call")["c"]
+        together["c"] != packed_keys(BACKEND, [[("c", "three"), ("b", "two")]], q, reuse="call", **shape)["c"]
     )
     joint = Backend("typesafe", "https://one.invalid", "m", joint_reads=True)
-    assert packed_keys(joint, calls, q, prefix="p", reuse="item") == packed_keys(
-        joint, calls, q, prefix="p", reuse="call"
+    assert packed_keys(joint, calls, q, reuse="item", **shape) == packed_keys(
+        joint, calls, q, reuse="call", **shape
+    )
+
+
+def test_order_is_part_of_what_was_asked():
+    assert answer_key(BACKEND, "s", Choice("pick", ["yes", "no"])) != answer_key(
+        BACKEND, "s", Choice("pick", ["no", "yes"])
+    )
+    assert Choice("pick", ["yes", "no"]) != Choice("pick", ["no", "yes"])
+    assert answer_key(BACKEND, {"a": 1, "b": 2}, Noul("x")) != answer_key(
+        BACKEND, {"b": 2, "a": 1}, Noul("x")
     )
 
 
@@ -112,11 +126,28 @@ def test_questions_read_their_own_answers_and_round_trip_through_their_bodies():
         assert from_body(question.body()) == question and hash(from_body(question.body())) == hash(question)
     assert Choice("pick", {"yes": "yes", "no": "no"}) == YES_NO
     assert Noul("{slot} fits").at("p2").text == "p2 fits"
-    for bad in (lambda: Noul(" "), lambda: Choice("pick", ["only"]), lambda: Score("rate", ["one"])):
+    bad = (
+        lambda: Noul(" "),
+        lambda: Choice("pick", ["only"]),
+        lambda: Choice("pick", "ab"),
+        lambda: Choice("pick", {"a", "b"}),
+        lambda: Score("rate", ["one"]),
+        lambda: Score("rate", "abc"),
+    )
+    for make in bad:
         with pytest.raises(ValueError):
-            bad()
+            make()
+    with pytest.raises(TypeError):
+        Question("x")
     with pytest.raises(ValueError, match="unknown question type"):
         from_body({"type": "future", "instructions": "x"})
+    with pytest.raises(ValueError, match="unknown question fields: extra"):
+        from_body({"type": "noul", "instructions": "x", "extra": 1})
+    options = {"yes": "it fits", "no": "it does not"}
+    choice = Choice("pick", options)
+    options["maybe"] = "unsure"
+    assert list(choice.options) == ["yes", "no"]
+    assert Noul("{slot} fits", {"true": "{slot} fits"}).at("p1").body()["criteria"] == {"true": "p1 fits"}
 
 
 def test_partial_or_absent_answers_are_errors():

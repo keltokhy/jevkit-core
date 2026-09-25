@@ -26,8 +26,12 @@ class Entry:
 class AnswerStore:
     """Thread-safe SQLite storage. Each row carries its answer and who produced it, written together.
 
-    `read_only=True` opens an existing store without creating, migrating or writing it, for previews
-    and estimates; a missing store, or one of another schema, simply has no answers.
+    Each schema has a file of its own, `answers.v<N>.sqlite`, so tools on different runtime versions
+    share one cache directory without resetting each other's answers.
+
+    `read_only=True` opens an existing store for previews and estimates without migrating it or writing
+    an answer (SQLite may still create its -wal and -shm files); a missing store, one of another schema,
+    or a file that is not a store simply has no answers.
     """
 
     def __init__(
@@ -42,7 +46,11 @@ class AnswerStore:
                 db = sqlite3.connect(
                     f"{self.path.resolve().as_uri()}?mode=ro", uri=True, check_same_thread=False
                 )
-                if db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION:
+                try:
+                    current = db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+                except sqlite3.DatabaseError:
+                    current = False
+                if current:
                     self.db = db
                 else:
                     db.close()
@@ -59,7 +67,7 @@ class AnswerStore:
 
     @staticmethod
     def default_path(settings: Settings | None = None) -> Path:
-        return (settings or Settings.from_env()).cache_dir / "answers.sqlite"
+        return (settings or Settings.from_env()).cache_dir / f"answers.v{SCHEMA_VERSION}.sqlite"
 
     def _prepare(self) -> None:
         with self._lock:

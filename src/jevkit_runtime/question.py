@@ -14,6 +14,7 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import Any, ClassVar
 
 SLOT = "{slot}"
@@ -26,6 +27,17 @@ def _probability(value) -> bool:
         and math.isfinite(value)
         and 0 <= value <= 1
     )
+
+
+def _frozen(mapping: Mapping[str, str] | None, what: str) -> Mapping[str, str] | None:
+    """A read-only copy, so a caller changing its dict later cannot change what a question asks."""
+    if mapping is None:
+        return None
+    if not isinstance(mapping, Mapping) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in mapping.items()
+    ):
+        raise ValueError(f"{what} must map names to descriptions")
+    return MappingProxyType(dict(mapping))
 
 
 def _optional_confidence(answer: dict) -> None:
@@ -41,14 +53,19 @@ class Question:
     instructions: str
 
     def __post_init__(self) -> None:
+        if type(self) is Question:
+            raise TypeError("ask a Noul, a Choice or a Score")
         if not isinstance(self.instructions, str) or not self.instructions.strip():
             raise ValueError("a question needs instructions")
 
+    def _wire(self) -> str:
+        return json.dumps(self.body(), ensure_ascii=False)  # in order: the order of options is asked too
+
     def __eq__(self, other) -> bool:
-        return isinstance(other, Question) and self.body() == other.body()
+        return isinstance(other, Question) and self._wire() == other._wire()
 
     def __hash__(self) -> int:
-        return hash(json.dumps(self.body(), sort_keys=True))
+        return hash(self._wire())
 
     @property
     def text(self) -> str:
@@ -58,7 +75,7 @@ class Question:
         return {"type": self.type, "instructions": self.instructions}
 
     def at(self, slot: str) -> Question:
-        """This question for one slot of a packed request."""
+        """This question for one slot of a packed request: `{slot}` filled in wherever it is written."""
         return replace(self, instructions=self.instructions.replace(SLOT, slot))
 
     def validate(self, answer: Any) -> None:
@@ -83,6 +100,16 @@ class Noul(Question):
 
     type: ClassVar[str] = "noul"
     criteria: Mapping[str, str] | None = field(default=None)  # what "true" and "false" mean, when spelled out
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        object.__setattr__(self, "criteria", _frozen(self.criteria, "criteria") or None)
+
+    def at(self, slot: str) -> Noul:
+        filled = super().at(slot)
+        if not self.criteria:
+            return filled
+        return replace(filled, criteria={k: v.replace(SLOT, slot) for k, v in self.criteria.items()})
 
     def body(self) -> dict:
         body = super().body()
@@ -111,10 +138,18 @@ class Choice(Question):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if isinstance(self.options, Sequence) and not isinstance(self.options, str):
-            object.__setattr__(self, "options", {label: label for label in self.options})
-        if len(self.options) < 2 or not all(isinstance(label, str) and label for label in self.options):
+        options = self.options
+        if isinstance(options, Sequence) and not isinstance(options, str):
+            options = {label: label for label in options}
+        if not isinstance(options, Mapping):
+            raise ValueError("options are a list of labels or a mapping of labels to descriptions, in order")
+        options = _frozen(options, "options")
+        if len(options) < 2 or not all(options):
             raise ValueError("a choice needs at least two named options")
+        object.__setattr__(self, "options", options)
+
+    def at(self, slot: str) -> Choice:
+        return replace(super().at(slot), options={k: v.replace(SLOT, slot) for k, v in self.options.items()})
 
     def body(self) -> dict:
         return super().body() | {"criteria": dict(self.options)}
@@ -151,6 +186,8 @@ class Score(Question):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if isinstance(self.levels, (str, set, frozenset)) or not isinstance(self.levels, Sequence):
+            raise ValueError("levels are a sequence of names, lowest first")
         object.__setattr__(self, "levels", tuple(self.levels))
         if len(self.levels) < 2 or not all(isinstance(level, str) and level for level in self.levels):
             raise ValueError("a score needs at least two named levels")
@@ -177,8 +214,13 @@ class Score(Question):
         return None if found is None else float(found)
 
 
+FIELDS = {"type", "instructions", "criteria"}
+
+
 def from_body(body: Mapping) -> Question:
     """The question a saved request body describes: the inverse of `Question.body`."""
+    if unknown := set(body) - FIELDS:
+        raise ValueError(f"unknown question fields: {', '.join(sorted(unknown))}")
     kind = body.get("type")
     if kind == "noul":
         return Noul(body.get("instructions"), body.get("criteria"))

@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import math
 from collections.abc import Callable, Coroutine, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -16,17 +17,19 @@ from .budget import Budget, Hold
 from .errors import JevBudgetExceeded, JevError, JevFatal
 from .meter import Meter
 from .protocol import (
+    REQUEST_OVERHEAD_TOKENS,
     answer_keys,
     answer_origin,
     estimate_tokens,
     packed_keys,
+    packed_request,
     parse_answers,
     parse_usage,
     request_body,
     resolved_model,
 )
 from .providers import Backend
-from .question import Question
+from .question import SLOT, Question
 from .store import AnswerStore
 from .workers import Workers
 
@@ -46,16 +49,36 @@ class Answers(dict):
         self.origins: dict[str, dict] = dict(origins)
 
 
+class PackedAnswers(dict):
+    """Answers by item: each item's answers by question id.
+
+    `origins[item]` says where its answers came from; an item answered in a call also names its `slot` and
+    the `pack` size. `errors[item]` holds the failure of an item that has no answers: its call failed, the
+    budget had no room for it, or it is too large to ask even alone.
+    """
+
+    def __init__(self, answers, origins, errors):
+        super().__init__(answers)
+        self.origins: dict[str, dict] = dict(origins)
+        self.errors: dict[str, Exception] = dict(errors)
+
+
 @dataclass(frozen=True)
 class Plan:
-    """What asking would do, read from the store without sending or writing anything."""
+    """What asking would do, read from the store without sending or writing anything.
 
+    A plan belongs to the client that made it: `send` refuses a plan made for another backend or scope.
+    """
+
+    backend: tuple[str, str, str]  # provider, endpoint and model the keys were computed for
+    scope: str | None
     state: Any
     questions: dict[str, Question]
     keys: dict[str, str]
     hits: dict[str, dict]  # answers the store already holds
     origins: dict[str, dict]  # their provenance, each with source "cache"
     misses: dict[str, Question]  # what a request would carry
+    whole: bool  # served whole or asked again whole: a joint read, or a packed call reused only as a call
     request: dict | None  # the body it would send; None when nothing is missing
     oversized: str | None  # why that request exceeds the provider's limits, if it does
     tokens: int  # the input tokens that request would bill, estimated
@@ -64,6 +87,33 @@ class Plan:
     @property
     def complete(self) -> bool:
         return not self.misses
+
+
+@dataclass(frozen=True)
+class PackedCall:
+    plan: Plan
+    slots: dict[str, str]  # slot -> item
+
+
+@dataclass(frozen=True)
+class PackedPlan:
+    """What asking about several packed items would do, read from the store without sending anything."""
+
+    items: tuple[str, ...]
+    questions: dict[str, Question]
+    calls: list[PackedCall]  # the calls that would go out
+    hits: dict[str, dict[str, dict]]  # items the store answers whole, with their answers by question id
+    origins: dict[str, dict]  # their provenance
+    twins: dict[str, str] = field(default_factory=dict)  # item -> the item with the same state it takes after
+    errors: dict[str, Exception] = field(default_factory=dict)  # items that cannot be asked even alone
+
+    @property
+    def tokens(self) -> int:
+        return sum(call.plan.tokens for call in self.calls)
+
+    @property
+    def cost(self) -> float:
+        return sum(call.plan.cost for call in self.calls)
 
 
 def http2_available() -> bool:
@@ -117,6 +167,10 @@ class Client:
         return self.backend.url
 
     @property
+    def identity(self) -> tuple[str, str, str]:
+        return (self.backend.name, self.backend.url, self.backend.model)
+
+    @property
     def http(self) -> httpx.AsyncClient:
         """Opened on first use, so cache-only clients never hold a connection pool."""
         if self._http is None:
@@ -144,6 +198,11 @@ class Client:
             await self._workers.start()
 
     async def close(self) -> None:
+        """Stop requests still in the air that no caller waits for, then the connections and workers."""
+        flights = list(self._flights.values())
+        for task in flights:
+            task.cancel()
+        await asyncio.gather(*flights, return_exceptions=True)
         if self._http is not None:
             await self._http.aclose()
             self._http = None
@@ -165,19 +224,27 @@ class Client:
         the store serves the whole batch or none of it.
         """
         keys = answer_keys(self.backend, state, questions, scope=scope)
+        return self._plan(state, dict(questions), keys, scope, whole=self.backend.joint_reads)
+
+    def _plan(
+        self, state, questions: dict[str, Question], keys: dict[str, str], scope, *, whole: bool
+    ) -> Plan:
         hits = self._stored(questions, keys)
-        if self.backend.joint_reads and len(hits) != len(questions):
+        if whole and len(hits) != len(questions):
             hits = {}
         misses = {qid: q for qid, q in questions.items() if qid not in hits}
         request = request_body(self.backend.model, state, misses) if misses else None
         tokens = estimate_tokens(request) if request else 0
         return Plan(
+            self.identity,
+            scope,
             state,
-            dict(questions),
+            questions,
             keys,
             {qid: answer for qid, (answer, _) in hits.items()},
             {qid: origin for qid, (_, origin) in hits.items()},
             misses,
+            whole,
             request,
             self._oversized(request),
             tokens,
@@ -200,15 +267,18 @@ class Client:
         return found
 
     def _oversized(self, request: dict | None) -> str | None:
+        """Why a request is over the provider's documented token limits, by the runtime's estimate."""
         if request is None:
             return None
-        name, limit, read = self.backend.name, self.backend.max_request_bytes, self.backend.max_read_bytes
-        if limit is not None and (size := _size(request)) > limit:
-            return f"request of {size:,} bytes is over {name}'s limit of {limit:,}"
+        name = self.backend.name
+        limit, read = self.backend.max_request_tokens, self.backend.max_read_tokens
+        if limit is not None and (tokens := estimate_tokens(request)) > limit:
+            return f"request of about {tokens:,} tokens is over {name}'s limit of {limit:,}"
         if read is not None and request["questions"]:
             size = _size(request["state"]) + max(_size(q) for q in request["questions"].values())
-            if size > read:
-                return f"state and question of {size:,} bytes are over {name}'s limit of {read:,}"
+            tokens = math.ceil(size / 4) + REQUEST_OVERHEAD_TOKENS
+            if tokens > read:
+                return f"state and question of about {tokens:,} tokens are over {name}'s limit of {read:,}"
         return None
 
     # ---- asking -----------------------------------------------------------------------------------
@@ -227,22 +297,26 @@ class Client:
             self.plan(state, questions, scope=scope), hedge_after=hedge_after, priority=priority
         )
 
-    async def send(
-        self,
-        plan: Plan,
-        *,
-        hedge_after: float | None = None,
-        priority: bool = False,
-    ) -> Answers:
+    async def send(self, plan: Plan, *, hedge_after: float | None = None, priority: bool = False) -> Answers:
         """Complete a plan: join an identical request already in flight, or send its misses.
 
         A new request is sent only if its estimate fits the client's budget; otherwise JevBudgetExceeded,
         though store hits and a request already in flight still answer. Only the caller whose request goes
         out pays. `hedge_after` sends a slow call a second time, budget permitting, and keeps the first
-        answer.
+        answer. `priority` sends ahead of other work when the client has workers.
         """
-        for question in plan.questions.values():
-            self.meter.note_question(question)
+        return await self._send(plan, hedge_after, priority, note=True)
+
+    async def _send(self, plan: Plan, hedge_after, priority, *, note: bool) -> Answers:
+        if plan.backend != self.identity:
+            raise ValueError(
+                f"this plan was made for {plan.backend[0]} {plan.backend[2]}, not {self.backend.name}"
+            )
+        if plan.whole and plan.misses and len(plan.misses) != len(plan.questions):
+            raise ValueError("this plan is answered whole; it cannot send only some of its questions")
+        if note:
+            for question in plan.questions.values():
+                self.meter.note_question(question)
         answers, origins = dict(plan.hits), dict(plan.origins)
         if not plan.misses:
             self.meter.cached += 1
@@ -257,104 +331,175 @@ class Client:
             self.meter.note_answer(origin)
         return Answers({q: answers[q] for q in plan.questions}, {q: origins[q] for q in plan.questions})
 
-    async def ask_packed(
+    # ---- packed requests --------------------------------------------------------------------------
+
+    def plan_packed(
         self,
         items: Mapping[str, Any],
-        question: Question,
+        questions: Mapping[str, Question],
         *,
+        context=None,
         prefix: str = "p",
-        reuse: str = "item",
+        reuse: str = "call",
         max_items: int | None = None,
         scope: str | None = None,
-        hedge_after: float | None = None,
-        priority: bool = False,
-    ) -> Answers:
-        """Ask one question about each of several items, packing items into as few calls as fit.
+    ) -> PackedPlan:
+        """How several items would be asked, packed into as few calls as fit. No network, no writes.
 
-        Each call's state holds its items in slots `prefix` + position, and `question` is asked once per
-        slot with `{slot}` filled in. Answers come back by item id.
+        Each call's state holds its items in slots `prefix` + position (beside `context`, when given), and
+        each question, which must name its slot as `{slot}`, is asked once per slot as `slot.qid`.
 
-        `reuse="item"` keys each answer on its item and the question as written, so an item answered
-        in one call is served from the store in any other. `reuse="call"` keys it on its place in the
-        whole call, which is served whole or asked again whole; joint-read backends always use it.
-
-        Calls go out together. If one fails, its error is raised once every call has finished, and the
-        answers that did arrive are already stored.
+        `reuse="call"` (the default, and always on joint-read servers) reuses an answer only in the same
+        call, since an item's answer can move with the company it is read in. `reuse="item"` reuses each
+        item's answers wherever it turns up again, among calls no wider than `max_items`.
         """
         if reuse not in REUSE:
             raise ValueError(f"reuse must be one of {', '.join(REUSE)}")
         if max_items is not None and max_items < 1:
             raise ValueError("max_items must be at least 1")
-        self.meter.note_question(question)
+        if not questions:
+            raise ValueError("ask at least one question")
+        if unslotted := [qid for qid, q in questions.items() if SLOT not in q.instructions]:
+            raise ValueError(f"packed questions must name their slot as {SLOT}: {', '.join(unslotted)}")
+        questions = dict(questions)
         by_item = reuse == "item" and not self.backend.joint_reads
         entries = list(items.items())
+        shape = dict(prefix=prefix, context=context, width=max_items, scope=scope)
+        hits: dict[str, dict] = {}
+        origins: dict[str, dict] = {}
+        twins: dict[str, str] = {}
         if by_item:
-            keys = packed_keys(self.backend, [entries], question, prefix=prefix, reuse="item", scope=scope)
-            stored = self._stored(dict.fromkeys(items, question), keys)
-            first: dict[str, str] = {}  # an item whose key another item already carries is asked once
-            for item, _ in entries:
-                if item not in stored:
-                    first.setdefault(keys[item], item)
-            calls = self._calls([(i, items[i]) for i in first.values()], question, prefix, max_items)
+            keys = packed_keys(self.backend, [entries], questions, reuse="item", **shape)
+            first: dict[tuple, str] = {}
+            ask: list[tuple[str, Any]] = []
+            for item, state in entries:
+                signature = tuple(keys[item].values())
+                if signature in first:
+                    twins[item] = first[signature]  # the same state, so the same keys: asked once
+                    continue
+                first[signature] = item
+                stored = self._stored(questions, keys[item])
+                if len(stored) == len(questions):
+                    hits[item] = {qid: answer for qid, (answer, _) in stored.items()}
+                    origins[item] = next(iter(stored.values()))[1]
+                else:
+                    ask.append((item, state))
+            calls, errors = self._split(ask, questions, prefix, context, max_items)
         else:
-            calls = self._calls(entries, question, prefix, max_items)
-            keys = packed_keys(self.backend, calls, question, prefix=prefix, reuse="call", scope=scope)
-            stored = self._stored(dict.fromkeys(items, question), keys)
-            whole = [call for call in calls if all(item in stored for item, _ in call)]
-            stored = {item: stored[item] for call in whole for item, _ in call}
-            calls = [call for call in calls if call not in whole]
+            calls, errors = self._split(entries, questions, prefix, context, max_items)
+            keys = packed_keys(self.backend, calls, questions, reuse="call", **shape)
+        planned = []
+        for call in calls:
+            slots, state, wire = packed_request(call, questions, prefix=prefix, context=context)
+            wire_keys = {
+                f"{slot}.{qid}": keys[item][qid] for slot, item in slots.items() for qid in questions
+            }
+            plan = self._plan(state, wire, wire_keys, scope, whole=not by_item)
+            if plan.complete:
+                for slot, item in slots.items():
+                    hits[item] = {qid: plan.hits[f"{slot}.{qid}"] for qid in questions}
+                    origins[item] = plan.origins[f"{slot}.{next(iter(questions))}"]
+            else:
+                planned.append(PackedCall(plan, slots))
+        return PackedPlan(tuple(items), questions, planned, hits, origins, twins, errors)
 
-        answers = {item: answer for item, (answer, _) in stored.items()}
-        origins = {item: origin for item, (_, origin) in stored.items()}
-        if not calls:
+    def _split(self, entries, questions, prefix, context, max_items):
+        """Items in order, in calls of at most `max_items` whose UTF-8 bytes stay inside the provider's
+        token limits (a conservative bound); an item that fits no call even alone is an error."""
+        limit, read = self.backend.max_request_tokens, self.backend.max_read_tokens
+        asked = [_size(q.at(f"{prefix}000").body()) + len(prefix) + 12 for q in questions.values()]
+        base_state = 2 if context is None else _size(context) + 24
+        base_request = _size(request_body(self.backend.model, None, {})) + base_state
+        calls: list[list] = []
+        errors: dict[str, Exception] = {}
+        state_bytes = request_bytes = 0
+        for item, state in entries:
+            item_bytes = _size(state) + len(prefix) + 8
+            fits = (
+                calls
+                and (max_items is None or len(calls[-1]) < max_items)
+                and (read is None or state_bytes + item_bytes + max(asked) <= read)
+                and (limit is None or request_bytes + item_bytes + sum(asked) <= limit)
+            )
+            if fits:
+                calls[-1].append((item, state))
+                state_bytes += item_bytes
+                request_bytes += item_bytes + sum(asked)
+                continue
+            calls.append([(item, state)])
+            state_bytes, request_bytes = base_state + item_bytes, base_request + item_bytes + sum(asked)
+        kept = []
+        for call in calls:
+            if len(call) == 1:  # alone and over the byte bound: the token estimate decides
+                _, state, wire = packed_request(call, questions, prefix=prefix, context=context)
+                if reason := self._oversized(request_body(self.backend.model, state, wire)):
+                    errors[call[0][0]] = JevError(f"item {call[0][0]!r} alone is too large: {reason}")
+                    continue
+            kept.append(call)
+        return kept, errors
+
+    async def send_packed(
+        self, plan: PackedPlan, *, hedge_after: float | None = None, priority: bool = False
+    ) -> PackedAnswers:
+        """Send a packed plan's calls together. A failed call's items get its error instead of answers;
+        a fatal error stops the run and is raised once every call has finished."""
+        for question in plan.questions.values():
+            self.meter.note_question(question)
+        answers = {item: dict(found) for item, found in plan.hits.items()}
+        origins, errors = dict(plan.origins), dict(plan.errors)
+        for item in plan.hits:
+            for _ in plan.questions:
+                self.meter.note_answer(origins[item])
+        if not plan.calls:
             self.meter.cached += 1
         results = await asyncio.gather(
-            *(self._packed_call(call, question, prefix, keys, hedge_after, priority) for call in calls),
+            *(self._send(call.plan, hedge_after, priority, note=False) for call in plan.calls),
             return_exceptions=True,
         )
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
-            for item, (answer, origin) in result.items():
-                answers[item], origins[item] = answer, origin
-        if by_item:
-            for item, _ in entries:  # items that shared a key take the answer their twin was given
-                if item not in answers:
-                    twin = first[keys[item]]
-                    answers[item], origins[item] = answers[twin], origins[twin]
-        for item in items:
-            self.meter.note_answer(origins[item])
-        return Answers({i: answers[i] for i in items}, {i: origins[i] for i in items})
-
-    def _slots(self, call: list[tuple[str, Any]], question: Question, prefix: str):
-        slots = [f"{prefix}{position}" for position in range(len(call))]
-        state = {slot: item_state for slot, (_, item_state) in zip(slots, call, strict=True)}
-        return slots, state, {slot: question.at(slot) for slot in slots}
-
-    def _calls(self, entries, question: Question, prefix: str, max_items: int | None) -> list[list]:
-        """Items in order, in calls of at most `max_items` that each fit the provider's limits."""
-        calls: list[list] = []
-        for entry in entries:
-            if calls and (max_items is None or len(calls[-1]) < max_items):
-                _, state, questions = self._slots(calls[-1] + [entry], question, prefix)
-                if not self._oversized(request_body(self.backend.model, state, questions)):
-                    calls[-1].append(entry)
+        fatal = next(
+            (r for r in results if isinstance(r, BaseException) and not isinstance(r, Exception)), None
+        )
+        fatal = fatal or next((r for r in results if isinstance(r, JevFatal)), None)
+        if fatal is not None:
+            raise fatal
+        for call, result in zip(plan.calls, results, strict=True):
+            for slot, item in call.slots.items():
+                if isinstance(result, Exception):
+                    errors[item] = result
                     continue
-            _, state, questions = self._slots([entry], question, prefix)
-            if reason := self._oversized(request_body(self.backend.model, state, questions)):
-                raise JevError(f"item {entry[0]!r} alone is too large: {reason}")
-            calls.append([entry])
-        return calls
+                answers[item] = {qid: result[f"{slot}.{qid}"] for qid in plan.questions}
+                origin = result.origins[f"{slot}.{next(iter(plan.questions))}"]
+                origins[item] = origin | {"slot": slot, "pack": len(call.slots)}
+        for item, twin in plan.twins.items():
+            if twin in answers:
+                answers[item], origins[item] = answers[twin], origins[twin]
+            elif twin in errors:
+                errors[item] = errors[twin]
+        return PackedAnswers(
+            {i: answers[i] for i in plan.items if i in answers},
+            {i: origins[i] for i in plan.items if i in origins},
+            {i: errors[i] for i in plan.items if i in errors},
+        )
 
-    async def _packed_call(self, call, question, prefix, keys, hedge_after, priority) -> dict:
-        slots, state, questions = self._slots(call, question, prefix)
-        slot_keys = {slot: keys[item] for slot, (item, _) in zip(slots, call, strict=True)}
-        fresh, owner = await self._fetch(state, questions, slot_keys, hedge_after, priority)
-        source = "api" if owner else "shared"
-        return {
-            item: (fresh[slot][0], fresh[slot][1] | {"source": source})
-            for slot, (item, _) in zip(slots, call, strict=True)
-        }
+    async def ask_packed(
+        self,
+        items: Mapping[str, Any],
+        questions: Mapping[str, Question],
+        *,
+        context=None,
+        prefix: str = "p",
+        reuse: str = "call",
+        max_items: int | None = None,
+        scope: str | None = None,
+        hedge_after: float | None = None,
+        priority: bool = False,
+    ) -> PackedAnswers:
+        """Ask each question about each item, packed into as few calls as fit: `plan_packed`, then
+        `send_packed`."""
+        plan = self.plan_packed(
+            items, questions, context=context, prefix=prefix, reuse=reuse, max_items=max_items, scope=scope
+        )
+        return await self.send_packed(plan, hedge_after=hedge_after, priority=priority)
 
     # ---- sending ----------------------------------------------------------------------------------
 
@@ -371,7 +516,8 @@ class Client:
 
         task, owner = self._share(send_keys.values(), start)
         if hedge_after is None:
-            by_key, origin = await task
+            # Shielded: a caller that stops waiting must not cancel a request others share.
+            by_key, origin = await asyncio.shield(task)
         else:
             by_key, origin = await self._hedged(task, hedge_after, body, questions, send_keys, priority)
         return {qid: (by_key[key], dict(origin)) for qid, key in send_keys.items()}, owner
@@ -399,19 +545,21 @@ class Client:
         try:
             hold = self.budget.reserve(self.backend, estimate_tokens(body))
         except JevBudgetExceeded:
-            return await first  # no room for a second copy; wait for the first
+            return await asyncio.shield(first)  # no room for a second copy; wait for the first
         second = asyncio.ensure_future(self._request(body, questions, keys, hold, priority))
         self.meter.hedges += 1
         pending = {first, second}
         error: BaseException | None = None
-        while pending:
-            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                if task.exception() is None:
-                    if second in pending:
-                        second.cancel()  # never cancel `first`: other callers may be sharing it
-                    return task.result()
-                error = task.exception()
+        try:
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    if task.exception() is None:
+                        return task.result()
+                    error = task.exception()
+        finally:
+            if not second.done():
+                second.cancel()  # never cancel `first`: other callers may be sharing it
         assert error is not None
         raise error
 

@@ -44,10 +44,13 @@ and `Budget.from_settings(default)` honours `JEV_BUDGET`.
 hits, the misses, the request those would make, and whether it is over the provider's limits. An
 estimate is a plan; a tool that schedules its own requests plans first and sends later.
 
-`Client.ask_packed(items, question)` asks one question about each of several items, packing items
-into as few calls as the provider's limits (and `max_items`) allow, with the question naming its
-slot as `{slot}`. With `reuse="item"` each answer is reused on its own wherever the item turns up
-again; with `reuse="call"`, and always on a joint-read server, only in the same call.
+`Client.ask_packed(items, questions, context=...)` asks each question about each of several items,
+packing items into as few calls as the provider's limits and `max_items` allow. Items sit in slots
+(`p0`, `p1`, ...) beside an optional shared context, and each question names its slot as `{slot}`.
+It returns `PackedAnswers` by item, with an item's failure in `errors[item]` rather than failing
+the rest. By default an answer is reused only in the same call, since an item's answer can move with
+the company it is read in; `reuse="item"` reuses it wherever the item turns up in a call of the same
+width. `plan_packed` shows the calls, hits and cost without sending, and `send_packed` sends them.
 
 | Module | Owns |
 |---|---|
@@ -75,15 +78,16 @@ such as one requested model answered by several.
 ## Conventions every tool shares
 
 - **Answer identity** is `answer_key(backend, state, question, scope=...)`: provider, endpoint, model,
-  scope, state and question. An answer from one provider or model is never served for another, and a
-  scope adds to the key without replacing it.
+  scope, state and question, in order. An answer from one provider or model is never served for another,
+  and a scope adds to the key without replacing it. A plan is sent only by the client that made it.
 - **Models are pinned.** Hosted Jev is requested as a concrete release (`jev-1.13.0`, or
   `typesafe/jev-1.13` on OpenRouter), bumped deliberately in a release of this package, so a key names
   the model that answers and a moved alias never mixes versions in one cache. `--model jev-latest`
   asks for the alias. `Meter.mixed_models` names any requested model that more than one model answered.
-- **The store** lives at `$XDG_CACHE_HOME/jev/answers.sqlite` (default `~/.cache/jev`), is created
-  private to the user, and resets itself when it finds an older schema. Version 0.4 cannot read
-  caches written by 0.3 tools; the first run after upgrading re-asks.
+- **The store** lives at `$XDG_CACHE_HOME/jev/answers.v3.sqlite` (default `~/.cache/jev`), created
+  private to the user. Each schema has a file of its own, so tools on runtime 0.3 (`answers.sqlite`)
+  and 0.4 work side by side; the first run on 0.4 re-asks, and the old file can go once every tool
+  is on 0.4.
 - **Credentials** come from the provider's variable, then `$XDG_CONFIG_HOME/jev/<provider>.key`.
   Gateways take their URL from `JEV_GATEWAY_URL` or `<provider>.url`. `JEV_URL` overrides any endpoint.
 - **Metering** refuses malformed usage rather than under-counting; a response without a reported

@@ -11,13 +11,17 @@ Part of the run-layer plan ([#14](https://github.com/keltokhy/jevkit-core/issues
   whole answer, options and scale bounds included, and reads it with `value` and `confidence`.
   `from_body` rebuilds a saved one. ([#6](https://github.com/keltokhy/jevkit-core/issues/6))
 - `Client.plan` reads the store without sending or writing: hits, misses, the request they would make,
-  and whether it is over the provider's limits. `ask` is `plan` then `send`. `AnswerStore(read_only=True)`
-  opens a store for previews without creating, migrating or writing it. Hosted Jev providers carry
-  their request limits. ([#7](https://github.com/keltokhy/jevkit-core/issues/7))
-- `Client.ask_packed` asks one question about each of several items in as few calls as fit, reusing
-  answers per item, or per call with `reuse="call"` and always on joint-read servers. `keys=` is gone;
+  and whether it is over the provider's documented token limits (hosted Jev: 64k per request, 32k for
+  the state and its longest question). `ask` is `plan` then `send`, and `send` refuses a plan made by
+  another client. `AnswerStore(read_only=True)` opens a store for previews without migrating it or
+  writing an answer. ([#7](https://github.com/keltokhy/jevkit-core/issues/7))
+- Packed requests ([#5](https://github.com/keltokhy/jevkit-core/issues/5)): `ask_packed(items,
+  questions, context=...)` asks each question about each item in as few calls as fit, with each
+  question naming its slot as `{slot}`, and returns `PackedAnswers` with a failed item's error in
+  `errors` rather than failing the rest. Answers are reused only in the same call unless
+  `reuse="item"`, which reuses them in any call of the same width; joint-read servers always reuse
+  by call. `plan_packed` and `send_packed` split it for estimates and schedulers. `keys=` is gone;
   `scope=` adds to an answer's key and never replaces it.
-  ([#5](https://github.com/keltokhy/jevkit-core/issues/5))
 - Hosted Jev is pinned to `jev-1.13.0` (`typesafe/jev-1.13` on OpenRouter) instead of the
   `jev-latest` alias, and `Meter.mixed_models` names a requested model that several models answered.
   ([#9](https://github.com/keltokhy/jevkit-core/issues/9))
@@ -46,7 +50,13 @@ Part of the run-layer plan ([#14](https://github.com/keltokhy/jevkit-core/issues
   limit together. `Client(budget=...)` replaces `allow_paid=` and `on_cost=`; `Budget(0)` allows only
   what costs nothing. `JEV_BUDGET` (dollars, or `none`) overrides a tool's default. `Plan` carries the
   estimated `tokens` and `cost` of its request.
-- Answer keys are v3 and the store schema is 3: the first run after upgrading re-asks.
+- Answer keys are v3, and order-sensitive: a state's fields and a question's options are keyed in the
+  order they are sent. The store is `answers.v3.sqlite`, beside 0.3's `answers.sqlite`, so tools on
+  either runtime share a cache directory; the first run after upgrading re-asks.
+- A caller that stops waiting no longer cancels a request other callers share; `Client.close` stops
+  requests nobody waits for.
+- Questions copy their options and criteria, reject unordered options, fill `{slot}` in criteria too,
+  and `from_body` rejects fields it does not know.
 
 ## 0.3.2
 

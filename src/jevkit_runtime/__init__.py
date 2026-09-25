@@ -3,7 +3,7 @@
 from importlib.metadata import version
 
 from .budget import Budget, Hold
-from .client import Answers, Client, Plan
+from .client import Answers, Client, PackedAnswers, PackedPlan, Plan
 from .errors import (
     JevBudgetExceeded,
     JevError,
@@ -22,6 +22,7 @@ from .protocol import (
     error_detail,
     estimate_tokens,
     packed_keys,
+    packed_request,
     parse_answers,
     parse_usage,
     request_body,
@@ -51,6 +52,8 @@ __all__ = [
     "JevFatal",
     "Meter",
     "Noul",
+    "PackedAnswers",
+    "PackedPlan",
     "PROVIDERS",
     "Plan",
     "ProviderError",
@@ -73,6 +76,7 @@ __all__ = [
     "fingerprint",
     "from_body",
     "packed_keys",
+    "packed_request",
     "parse_answers",
     "parse_usage",
     "post",

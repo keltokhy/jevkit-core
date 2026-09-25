@@ -31,6 +31,11 @@ Part of the run-layer plan ([#14](https://github.com/keltokhy/jevkit-core/issues
   records in hand counting those waiting their turn, returns results in input order or as they finish,
   and on leaving early stops the reader, closes it and cancels what is in flight. `open_text` reads a
   file or standard input through a descriptor of its own.
+- `Client(workers=N)` ([#13](https://github.com/keltokhy/jevkit-core/issues/13)) sends requests from N
+  processes of its own, past one process's ceiling of about 200 calls a second, while identity, the
+  store, request sharing, the budget and the meter stay in the client. `ask(..., priority=True)` never
+  waits for a worker's slot; `client.start()` starts the processes ahead of the first request. The
+  runtime's structured errors now survive pickling.
 - `jevkit_runtime.cli` ([#11](https://github.com/keltokhy/jevkit-core/issues/11)): the flags every tool
   shares, with `--budget none` for no limit and `--budget 0` for cache only; provider help generated
   from the catalog (providers gain a `title`); `runtime_from_args`, `stats_line`, `show_stats`, and

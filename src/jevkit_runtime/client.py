@@ -28,6 +28,7 @@ from .protocol import (
 from .providers import Backend
 from .question import Question
 from .store import AnswerStore
+from .workers import Workers
 
 Flight = tuple[dict[str, dict], dict]  # answers by key, and the origin they share
 REUSE = ("item", "call")
@@ -87,7 +88,10 @@ class Client:
         store: AnswerStore | None = None,
         budget: Budget | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        workers: int = 0,
+        per_worker: int = 64,
     ):
+        """`workers` sends requests from that many processes of its own; see `workers.py`."""
         self.backend = backend
         self.budget = budget if budget is not None else Budget()
         self.timeout, self.attempts, self.store = timeout, attempts, store
@@ -96,6 +100,13 @@ class Client:
         self.meter = Meter(provider=backend.name, requested_model=backend.model)
         self._flights: dict[str, asyncio.Task[Flight]] = {}
         self._http: httpx.AsyncClient | None = None
+        if workers and transport is not None:
+            raise ValueError("a test transport runs in this process; it cannot be used with workers")
+        self._workers = (
+            Workers(workers, per_worker=per_worker, headers=self._headers(), http2=http2_available())
+            if workers
+            else None
+        )
 
     @property
     def model(self) -> str:
@@ -109,9 +120,6 @@ class Client:
     def http(self) -> httpx.AsyncClient:
         """Opened on first use, so cache-only clients never hold a connection pool."""
         if self._http is None:
-            headers = {"X-Title": "jev tools"}
-            if self.backend.key:
-                headers["Authorization"] = f"Bearer {self.backend.key}"
             limits = (
                 httpx.Limits(max_connections=16, max_keepalive_connections=16, keepalive_expiry=120)
                 if self.http2
@@ -120,14 +128,27 @@ class Client:
                 )
             )
             self._http = httpx.AsyncClient(
-                headers=headers, limits=limits, transport=self.transport, http2=self.http2
+                headers=self._headers(), limits=limits, transport=self.transport, http2=self.http2
             )
         return self._http
+
+    def _headers(self) -> dict:
+        headers = {"X-Title": "jev tools"}
+        if self.backend.key:
+            headers["Authorization"] = f"Bearer {self.backend.key}"
+        return headers
+
+    async def start(self) -> None:
+        """Start the worker processes now, rather than on the first request that needs them."""
+        if self._workers is not None:
+            await self._workers.start()
 
     async def close(self) -> None:
         if self._http is not None:
             await self._http.aclose()
             self._http = None
+        if self._workers is not None:
+            await self._workers.close()
 
     async def __aenter__(self) -> Client:
         return self
@@ -199,11 +220,11 @@ class Client:
         *,
         scope: str | None = None,
         hedge_after: float | None = None,
+        priority: bool = False,
     ) -> Answers:
         """Answer every question, sending only those the store cannot answer. `plan` and then `send`."""
         return await self.send(
-            self.plan(state, questions, scope=scope),
-            hedge_after=hedge_after,
+            self.plan(state, questions, scope=scope), hedge_after=hedge_after, priority=priority
         )
 
     async def send(
@@ -211,6 +232,7 @@ class Client:
         plan: Plan,
         *,
         hedge_after: float | None = None,
+        priority: bool = False,
     ) -> Answers:
         """Complete a plan: join an identical request already in flight, or send its misses.
 
@@ -227,7 +249,7 @@ class Client:
         else:
             if plan.oversized:
                 raise JevError(plan.oversized)
-            fresh, owner = await self._fetch(plan.state, plan.misses, plan.keys, hedge_after)
+            fresh, owner = await self._fetch(plan.state, plan.misses, plan.keys, hedge_after, priority)
             for qid, (answer, origin) in fresh.items():
                 answers[qid] = answer
                 origins[qid] = origin | {"source": "api" if owner else "shared"}
@@ -245,6 +267,7 @@ class Client:
         max_items: int | None = None,
         scope: str | None = None,
         hedge_after: float | None = None,
+        priority: bool = False,
     ) -> Answers:
         """Ask one question about each of several items, packing items into as few calls as fit.
 
@@ -286,7 +309,7 @@ class Client:
         if not calls:
             self.meter.cached += 1
         results = await asyncio.gather(
-            *(self._packed_call(call, question, prefix, keys, hedge_after) for call in calls),
+            *(self._packed_call(call, question, prefix, keys, hedge_after, priority) for call in calls),
             return_exceptions=True,
         )
         for result in results:
@@ -323,10 +346,10 @@ class Client:
             calls.append([entry])
         return calls
 
-    async def _packed_call(self, call, question, prefix, keys, hedge_after) -> dict:
+    async def _packed_call(self, call, question, prefix, keys, hedge_after, priority) -> dict:
         slots, state, questions = self._slots(call, question, prefix)
         slot_keys = {slot: keys[item] for slot, (item, _) in zip(slots, call, strict=True)}
-        fresh, owner = await self._fetch(state, questions, slot_keys, hedge_after)
+        fresh, owner = await self._fetch(state, questions, slot_keys, hedge_after, priority)
         source = "api" if owner else "shared"
         return {
             item: (fresh[slot][0], fresh[slot][1] | {"source": source})
@@ -336,7 +359,7 @@ class Client:
     # ---- sending ----------------------------------------------------------------------------------
 
     async def _fetch(
-        self, state, questions: Mapping[str, Question], keys: Mapping[str, str], hedge_after
+        self, state, questions: Mapping[str, Question], keys: Mapping[str, str], hedge_after, priority
     ) -> tuple[dict[str, tuple[dict, dict]], bool]:
         """Answers for `questions` by id, each with its origin, and whether this caller sent the request."""
         send_keys = {qid: keys[qid] for qid in questions}
@@ -344,13 +367,13 @@ class Client:
 
         def start() -> Coroutine[Any, Any, Flight]:
             hold = self.budget.reserve(self.backend, estimate_tokens(body))  # raises when it does not fit
-            return self._request(body, questions, send_keys, hold)
+            return self._request(body, questions, send_keys, hold, priority)
 
         task, owner = self._share(send_keys.values(), start)
         if hedge_after is None:
             by_key, origin = await task
         else:
-            by_key, origin = await self._hedged(task, hedge_after, body, questions, send_keys)
+            by_key, origin = await self._hedged(task, hedge_after, body, questions, send_keys, priority)
         return {qid: (by_key[key], dict(origin)) for qid, key in send_keys.items()}, owner
 
     def _share(self, keys: Iterable[str], start: Callable[[], Coroutine[Any, Any, Flight]]):
@@ -369,7 +392,7 @@ class Client:
         task.add_done_callback(discard)
         return task, True
 
-    async def _hedged(self, first, after, body, questions, keys) -> Flight:
+    async def _hedged(self, first, after, body, questions, keys, priority) -> Flight:
         done, _ = await asyncio.wait({first}, timeout=after)
         if done:
             return first.result()
@@ -377,7 +400,7 @@ class Client:
             hold = self.budget.reserve(self.backend, estimate_tokens(body))
         except JevBudgetExceeded:
             return await first  # no room for a second copy; wait for the first
-        second = asyncio.ensure_future(self._request(body, questions, keys, hold))
+        second = asyncio.ensure_future(self._request(body, questions, keys, hold, priority))
         self.meter.hedges += 1
         pending = {first, second}
         error: BaseException | None = None
@@ -393,21 +416,37 @@ class Client:
         raise error
 
     async def _request(
-        self, body: dict, questions: Mapping[str, Question], keys: Mapping[str, str], hold: Hold
+        self,
+        body: dict,
+        questions: Mapping[str, Question],
+        keys: Mapping[str, str],
+        hold: Hold,
+        priority: bool,
     ) -> Flight:
         def retry():
             self.meter.retries += 1
 
         try:
-            data = await transport.post(
-                self.http,
-                self.backend.url,
-                body,
-                provider=self.backend.name,
-                timeout=self.timeout,
-                attempts=self.attempts,
-                on_retry=retry,
-            )
+            if self._workers is not None:
+                data = await self._workers.post(
+                    self.backend.url,
+                    body,
+                    provider=self.backend.name,
+                    timeout=self.timeout,
+                    attempts=self.attempts,
+                    on_retry=retry,
+                    priority=priority,
+                )
+            else:
+                data = await transport.post(
+                    self.http,
+                    self.backend.url,
+                    body,
+                    provider=self.backend.name,
+                    timeout=self.timeout,
+                    attempts=self.attempts,
+                    on_retry=retry,
+                )
         except BaseException:
             hold.release()  # failed, refused or cancelled before any charge came back
             raise

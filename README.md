@@ -29,9 +29,16 @@ knows, joins an identical request already in flight, sends only the misses, vali
 response before storing any of it, and meters the call before validation so a billed but malformed
 answer still counts. It returns `Answers`, a dict by question id whose `origins` say who answered
 each one and whether it came from the API, the store, or a shared call. Per-call policy is keyword
-arguments: `scope` to keep a tool's answers apart from others that ask the same, `allow_paid=False`
-for cache-only runs, `on_cost` for the caller who should be charged, and `hedge_after` to resend a
-slow call. HTTP/2 is used whenever the `http2` extra is installed.
+arguments: `scope` to keep a tool's answers apart from others that ask the same, and `hedge_after`
+to resend a slow call. HTTP/2 is used whenever the `http2` extra is installed.
+
+Spending belongs to a `Budget` shared by the run, `Client(backend, budget=Budget(1.0))`. Before a
+request goes out it reserves the request's estimated price, at the dearest rate its backend has
+charged so far (1.5 times the list price until the first charge), and when the charge comes back it
+settles it. A request that does not fit raises `JevBudgetExceeded`, while the store and a request
+already in flight still answer, so requests in the air cannot overshoot the limit together; only a
+price rise mid-flight can, and `Budget.rises` counts it. `Budget(0)` allows only what costs nothing,
+and `Budget.from_settings(default)` honours `JEV_BUDGET`.
 
 `ask` is `plan` then `send`. `Client.plan` reads the store without sending or writing anything: the
 hits, the misses, the request those would make, and whether it is over the provider's limits. An
@@ -44,11 +51,12 @@ again; with `reuse="call"`, and always on a joint-read server, only in the same 
 
 | Module | Owns |
 |---|---|
-| `settings.py` | Every environment and filesystem convention, read in one place: `XDG_*`, `JEV_API`, `JEV_URL`, `JEV_MODEL`, `JEV_PRICE_PER_MTOK`, provider keys and URL files |
+| `settings.py` | Every environment and filesystem convention, read in one place: `XDG_*`, `JEV_API`, `JEV_URL`, `JEV_MODEL`, `JEV_PRICE_PER_MTOK`, `JEV_BUDGET`, provider keys and URL files |
 | `providers.py` | The catalog (`Provider`), a tool's selection of it or its own entries, and `resolve()` to one `Backend`: endpoint, model, key |
 | `question.py` | `Noul`, `Choice` and `Score`: request bodies, full answer validation, reading answers |
 | `protocol.py` | Request bodies, answer identity (plain, joint and packed), usage parsing, provenance |
 | `transport.py` | One HTTP call with a total deadline, retries with backoff and `Retry-After`, structured status errors |
+| `budget.py` | `Budget`: reserve a request's estimated price before it goes out, settle its charge when it returns |
 | `store.py` | SQLite answers with their provenance in one row, one versioned schema; read-only for previews |
 | `client.py` | The pipeline above, plans, packed requests, request sharing, hedging |
 | `meter.py` | Calls, cache hits, retries, hedges, tokens, cost, and which models actually answered |

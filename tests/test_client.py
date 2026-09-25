@@ -4,7 +4,17 @@ import json
 import httpx
 import pytest
 
-from jevkit_runtime import Answers, AnswerStore, Backend, Client, JevBudgetExceeded, JevError, JevFatal, Noul
+from jevkit_runtime import (
+    Answers,
+    AnswerStore,
+    Backend,
+    Budget,
+    Client,
+    JevBudgetExceeded,
+    JevError,
+    JevFatal,
+    Noul,
+)
 from jevkit_runtime import client as client_module
 
 BACKEND = Backend(
@@ -95,20 +105,20 @@ def test_only_missing_questions_are_sent_and_a_malformed_stored_answer_is_asked_
 @pytest.mark.parametrize("answers", [None, [], {"q": {"noul": 0.9}}, {"q": {"noul": 0.9}, "r": {}}])
 def test_invalid_responses_are_billed_but_never_partially_stored(tmp_path, answers):
     store = AnswerStore(tmp_path / "answers.sqlite")
-    charges = []
+    budget = Budget(1.0)
     transport = httpx.MockTransport(
         lambda request: httpx.Response(200, json={"answers": answers, "usage": {"cost": 0.01}})
     )
 
     async def exercise():
-        async with Client(BACKEND, store=store, transport=transport) as client:
+        async with Client(BACKEND, store=store, budget=budget, transport=transport) as client:
             with pytest.raises(JevError, match="answer"):
-                await client.ask("text", QUESTIONS, on_cost=charges.append)
+                await client.ask("text", QUESTIONS)
             assert client.meter.calls == 1 and client.meter.cost == 0.01
             assert store.db.execute("SELECT COUNT(*) FROM answers").fetchone()[0] == 0
 
     run(exercise())
-    assert charges == [0.01]
+    assert (budget.spent, budget.held) == (0.01, 0.0)
     store.close()
 
 
@@ -124,29 +134,28 @@ def test_invalid_usage_is_fatal_before_anything_is_counted():
     run(exercise())
 
 
-def test_one_owner_pays_and_a_cache_only_caller_can_join_the_flight():
+def test_one_owner_pays_and_a_caller_without_room_can_still_join_the_flight():
     fake = Fake(delay=0.05)
-    charges = [[], []]
 
     async def exercise():
         async with fake.client() as client:
-            first = asyncio.create_task(client.ask("s", QUESTIONS, on_cost=charges[0].append))
+            one = client.plan("s", QUESTIONS).cost * 1.5  # room for this request at the reserve margin
+            client.budget = budget = Budget(one * 1.01)
+            first = asyncio.create_task(client.ask("s", QUESTIONS))
             await asyncio.sleep(0.01)
-            second = asyncio.create_task(
-                client.ask("s", QUESTIONS, allow_paid=False, on_cost=charges[1].append)
-            )
+            assert budget.held > 0 and budget.remaining < one
+            second = asyncio.create_task(client.ask("s", QUESTIONS))
             assert await first == await second
             assert len(fake.bodies) == 1
             assert first.result().origins["q"]["source"] == "api"
             assert second.result().origins["q"]["source"] == "shared"
             assert (client.meter.calls, client.meter.cached) == (1, 1)
-            assert not client._flights
-            with pytest.raises(JevBudgetExceeded):
-                await client.ask("other", QUESTIONS, allow_paid=False)
-            assert len(fake.bodies) == 1
+            assert not client._flights and budget.held == 0 and budget.spent == 0.002
+            with pytest.raises(JevBudgetExceeded, match="budget has"):
+                await client.ask("other", QUESTIONS)
+            assert len(fake.bodies) == 1 and budget.exhausted
 
     run(exercise())
-    assert charges == [[0.002], []]
 
 
 @pytest.mark.parametrize("outcome", ["failure", "cancel"])
@@ -162,7 +171,7 @@ def test_failed_and_cancelled_flights_release_their_key(outcome):
         async with Client(BACKEND, attempts=1, transport=httpx.MockTransport(respond)) as client:
             first = asyncio.create_task(client.ask("s", QUESTIONS))
             await entered.wait()
-            second = asyncio.create_task(client.ask("s", QUESTIONS, allow_paid=False))
+            second = asyncio.create_task(client.ask("s", QUESTIONS))
             await asyncio.sleep(0)
             assert len(client._flights) == 1
             if outcome == "cancel":

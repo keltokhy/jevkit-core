@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .protocol import Usage
@@ -22,15 +21,13 @@ class Meter:
     cost_sources: dict[str, int] = field(default_factory=dict)
     answer_provenance: list[dict] = field(default_factory=list)
 
-    def record_call(self, usage: Usage, on_cost: Callable[[float], None] | None = None) -> None:
+    def record_call(self, usage: Usage) -> None:
         """Count a paid response before its answers are validated: an invalid answer was still billed."""
         self.calls += 1
         self.input_tokens += usage.tokens
         self.cost += usage.cost
         self.max_call_cost = max(self.max_call_cost, usage.cost)
         self.cost_sources[usage.source] = self.cost_sources.get(usage.source, 0) + 1
-        if on_cost is not None:
-            on_cost(usage.cost)
 
     def note_answer(self, origin: dict) -> None:
         """Tally where each answer came from, so a run can say which models actually answered."""

@@ -2,6 +2,7 @@
 
 from importlib.metadata import version
 
+from .budget import Budget, Hold
 from .client import Answers, Client, Plan
 from .errors import (
     JevBudgetExceeded,
@@ -19,6 +20,7 @@ from .protocol import (
     answer_keys,
     digest,
     error_detail,
+    estimate_tokens,
     packed_keys,
     parse_answers,
     parse_usage,
@@ -36,11 +38,13 @@ __all__ = [
     "AnswerStore",
     "Answers",
     "Backend",
+    "Budget",
     "Choice",
     "Client",
     "DEFAULT_PRICE_PER_MTOK",
     "Entry",
     "FATAL",
+    "Hold",
     "JevBudgetExceeded",
     "JevError",
     "JevFatal",
@@ -63,6 +67,7 @@ __all__ = [
     "catalog",
     "digest",
     "error_detail",
+    "estimate_tokens",
     "from_body",
     "packed_keys",
     "parse_answers",

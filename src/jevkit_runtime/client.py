@@ -12,11 +12,13 @@ from typing import Any
 import httpx
 
 from . import transport
-from .errors import JevBudgetExceeded, JevError
+from .budget import Budget, Hold
+from .errors import JevBudgetExceeded, JevError, JevFatal
 from .meter import Meter
 from .protocol import (
     answer_keys,
     answer_origin,
+    estimate_tokens,
     packed_keys,
     parse_answers,
     parse_usage,
@@ -55,6 +57,8 @@ class Plan:
     misses: dict[str, Question]  # what a request would carry
     request: dict | None  # the body it would send; None when nothing is missing
     oversized: str | None  # why that request exceeds the provider's limits, if it does
+    tokens: int  # the input tokens that request would bill, estimated
+    cost: float  # and their price at the backend's list price
 
     @property
     def complete(self) -> bool:
@@ -81,9 +85,11 @@ class Client:
         attempts: int = 4,
         concurrency: int = 32,
         store: AnswerStore | None = None,
+        budget: Budget | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.backend = backend
+        self.budget = budget if budget is not None else Budget()
         self.timeout, self.attempts, self.store = timeout, attempts, store
         self.concurrency, self.transport = concurrency, transport
         self.http2 = transport is None and http2_available()
@@ -143,6 +149,7 @@ class Client:
             hits = {}
         misses = {qid: q for qid, q in questions.items() if qid not in hits}
         request = request_body(self.backend.model, state, misses) if misses else None
+        tokens = estimate_tokens(request) if request else 0
         return Plan(
             state,
             dict(questions),
@@ -152,6 +159,8 @@ class Client:
             misses,
             request,
             self._oversized(request),
+            tokens,
+            tokens * self.backend.price_per_mtok / 1e6,
         )
 
     def _stored(self, questions: Mapping[str, Question], keys: Mapping[str, str]) -> dict[str, tuple]:
@@ -189,15 +198,11 @@ class Client:
         questions: Mapping[str, Question],
         *,
         scope: str | None = None,
-        allow_paid: bool = True,
-        on_cost: Callable[[float], None] | None = None,
         hedge_after: float | None = None,
     ) -> Answers:
         """Answer every question, sending only those the store cannot answer. `plan` and then `send`."""
         return await self.send(
             self.plan(state, questions, scope=scope),
-            allow_paid=allow_paid,
-            on_cost=on_cost,
             hedge_after=hedge_after,
         )
 
@@ -205,15 +210,14 @@ class Client:
         self,
         plan: Plan,
         *,
-        allow_paid: bool = True,
-        on_cost: Callable[[float], None] | None = None,
         hedge_after: float | None = None,
     ) -> Answers:
         """Complete a plan: join an identical request already in flight, or send its misses.
 
-        `allow_paid=False` still serves store hits and joins an in-flight request. `on_cost` is charged
-        only by the caller whose request actually went out. `hedge_after` sends a slow call a second
-        time and keeps the first answer.
+        A new request is sent only if its estimate fits the client's budget; otherwise JevBudgetExceeded,
+        though store hits and a request already in flight still answer. Only the caller whose request goes
+        out pays. `hedge_after` sends a slow call a second time, budget permitting, and keeps the first
+        answer.
         """
         answers, origins = dict(plan.hits), dict(plan.origins)
         if not plan.misses:
@@ -221,9 +225,7 @@ class Client:
         else:
             if plan.oversized:
                 raise JevError(plan.oversized)
-            fresh, owner = await self._fetch(
-                plan.state, plan.misses, plan.keys, allow_paid, on_cost, hedge_after
-            )
+            fresh, owner = await self._fetch(plan.state, plan.misses, plan.keys, hedge_after)
             for qid, (answer, origin) in fresh.items():
                 answers[qid] = answer
                 origins[qid] = origin | {"source": "api" if owner else "shared"}
@@ -240,8 +242,6 @@ class Client:
         reuse: str = "item",
         max_items: int | None = None,
         scope: str | None = None,
-        allow_paid: bool = True,
-        on_cost: Callable[[float], None] | None = None,
         hedge_after: float | None = None,
     ) -> Answers:
         """Ask one question about each of several items, packing items into as few calls as fit.
@@ -283,10 +283,7 @@ class Client:
         if not calls:
             self.meter.cached += 1
         results = await asyncio.gather(
-            *(
-                self._packed_call(call, question, prefix, keys, allow_paid, on_cost, hedge_after)
-                for call in calls
-            ),
+            *(self._packed_call(call, question, prefix, keys, hedge_after) for call in calls),
             return_exceptions=True,
         )
         for result in results:
@@ -323,10 +320,10 @@ class Client:
             calls.append([entry])
         return calls
 
-    async def _packed_call(self, call, question, prefix, keys, allow_paid, on_cost, hedge_after) -> dict:
+    async def _packed_call(self, call, question, prefix, keys, hedge_after) -> dict:
         slots, state, questions = self._slots(call, question, prefix)
         slot_keys = {slot: keys[item] for slot, (item, _) in zip(slots, call, strict=True)}
-        fresh, owner = await self._fetch(state, questions, slot_keys, allow_paid, on_cost, hedge_after)
+        fresh, owner = await self._fetch(state, questions, slot_keys, hedge_after)
         source = "api" if owner else "shared"
         return {
             item: (fresh[slot][0], fresh[slot][1] | {"source": source})
@@ -336,27 +333,21 @@ class Client:
     # ---- sending ----------------------------------------------------------------------------------
 
     async def _fetch(
-        self,
-        state,
-        questions: Mapping[str, Question],
-        keys: Mapping[str, str],
-        allow_paid,
-        on_cost,
-        hedge_after,
+        self, state, questions: Mapping[str, Question], keys: Mapping[str, str], hedge_after
     ) -> tuple[dict[str, tuple[dict, dict]], bool]:
         """Answers for `questions` by id, each with its origin, and whether this caller sent the request."""
         send_keys = {qid: keys[qid] for qid in questions}
+        body = request_body(self.backend.model, state, questions)
 
         def start() -> Coroutine[Any, Any, Flight]:
-            if not allow_paid:
-                raise JevBudgetExceeded("a new paid request is not allowed by the budget")
-            return self._request(state, questions, send_keys, on_cost)
+            hold = self.budget.reserve(self.backend, estimate_tokens(body))  # raises when it does not fit
+            return self._request(body, questions, send_keys, hold)
 
         task, owner = self._share(send_keys.values(), start)
         if hedge_after is None:
             by_key, origin = await task
         else:
-            by_key, origin = await self._hedged(task, hedge_after, state, questions, send_keys, on_cost)
+            by_key, origin = await self._hedged(task, hedge_after, body, questions, send_keys)
         return {qid: (by_key[key], dict(origin)) for qid, key in send_keys.items()}, owner
 
     def _share(self, keys: Iterable[str], start: Callable[[], Coroutine[Any, Any, Flight]]):
@@ -375,11 +366,15 @@ class Client:
         task.add_done_callback(discard)
         return task, True
 
-    async def _hedged(self, first, after, state, questions, keys, on_cost) -> Flight:
+    async def _hedged(self, first, after, body, questions, keys) -> Flight:
         done, _ = await asyncio.wait({first}, timeout=after)
         if done:
             return first.result()
-        second = asyncio.ensure_future(self._request(state, questions, keys, on_cost))
+        try:
+            hold = self.budget.reserve(self.backend, estimate_tokens(body))
+        except JevBudgetExceeded:
+            return await first  # no room for a second copy; wait for the first
+        second = asyncio.ensure_future(self._request(body, questions, keys, hold))
         self.meter.hedges += 1
         pending = {first, second}
         error: BaseException | None = None
@@ -395,22 +390,31 @@ class Client:
         raise error
 
     async def _request(
-        self, state, questions: Mapping[str, Question], keys: Mapping[str, str], on_cost
+        self, body: dict, questions: Mapping[str, Question], keys: Mapping[str, str], hold: Hold
     ) -> Flight:
         def retry():
             self.meter.retries += 1
 
-        data = await transport.post(
-            self.http,
-            self.backend.url,
-            request_body(self.backend.model, state, questions),
-            provider=self.backend.name,
-            timeout=self.timeout,
-            attempts=self.attempts,
-            on_retry=retry,
-        )
-        usage = parse_usage(data.get("usage"), price_per_mtok=self.backend.price_per_mtok)
-        self.meter.record_call(usage, on_cost)
+        try:
+            data = await transport.post(
+                self.http,
+                self.backend.url,
+                body,
+                provider=self.backend.name,
+                timeout=self.timeout,
+                attempts=self.attempts,
+                on_retry=retry,
+            )
+        except BaseException:
+            hold.release()  # failed, refused or cancelled before any charge came back
+            raise
+        try:
+            usage = parse_usage(data.get("usage"), price_per_mtok=self.backend.price_per_mtok)
+        except JevFatal:
+            hold.settle(hold.amount)  # answered, so perhaps billed, but unmetered: count the estimate
+            raise
+        self.meter.record_call(usage)
+        hold.settle(usage.cost)
         answers = parse_answers(data, questions, provider=self.backend.name)
         origin = answer_origin(self.backend, resolved_model(data))
         if self.store is not None:

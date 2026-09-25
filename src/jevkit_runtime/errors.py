@@ -10,7 +10,7 @@ class JevFatal(Exception):
 
 
 class JevBudgetExceeded(Exception):
-    """No cached or in-flight answer exists and a new paid request is forbidden."""
+    """A new request does not fit in the budget; no stored or in-flight answer could stand in for it."""
 
 
 class ProviderStatus(Exception):

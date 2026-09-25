@@ -79,6 +79,15 @@ def request_body(model: str, state, questions: Mapping[str, Question]) -> dict:
     return {"model": model, "state": state, "questions": {qid: q.body() for qid, q in questions.items()}}
 
 
+REQUEST_OVERHEAD_TOKENS = 270  # the server's own prompt around a request, as measured by the tools
+
+
+def estimate_tokens(body: dict) -> int:
+    """Input tokens a request will bill, near enough to budget for: a token per four UTF-8 bytes of its
+    JSON, plus the server's overhead."""
+    return math.ceil(len(json.dumps(body, ensure_ascii=False).encode()) / 4) + REQUEST_OVERHEAD_TOKENS
+
+
 def error_detail(data: dict) -> str:
     found = data.get("error", data.get("detail"))
     if isinstance(found, list):

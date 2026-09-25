@@ -22,6 +22,12 @@ Part of the run-layer plan ([#14](https://github.com/keltokhy/jevkit-core/issues
   `jev-latest` alias, and `Meter.mixed_models` names a requested model that several models answered.
   ([#9](https://github.com/keltokhy/jevkit-core/issues/9))
 - A stored answer that no longer validates is asked again and overwritten, instead of failing the call.
+- `Budget` owns spending ([#8](https://github.com/keltokhy/jevkit-core/issues/8)): each request reserves
+  its estimated price (`estimate_tokens`, at the dearest rate charged so far, 1.5 times list price
+  before the first charge) and settles its real charge, so concurrent requests cannot overshoot the
+  limit together. `Client(budget=...)` replaces `allow_paid=` and `on_cost=`; `Budget(0)` allows only
+  what costs nothing. `JEV_BUDGET` (dollars, or `none`) overrides a tool's default. `Plan` carries the
+  estimated `tokens` and `cost` of its request.
 - Answer keys are v3 and the store schema is 3: the first run after upgrading re-asks.
 
 ## 0.3.2

@@ -60,6 +60,7 @@ again; with `reuse="call"`, and always on a joint-read server, only in the same 
 | `store.py` | SQLite answers with their provenance in one row, one versioned schema; read-only for previews |
 | `client.py` | The pipeline above, plans, packed requests, request sharing, hedging |
 | `run.py` | `Run` and its record: tool, backends, models that answered, questions as asked, usage, budget, inputs; `warnings` |
+| `stream.py` | `ordered_map`: judge records as a reader thread yields them, a bounded window at a time, results in input order; `open_text` |
 | `cli.py` | The flags every tool shares (`--api --model --budget --timeout -j --no-cache --stats`), help text from the catalog, the stats line, `run_sync` |
 | `meter.py` | Calls, cache hits, retries, hedges, tokens, cost, and which models actually answered |
 | `errors.py` | `JevError`, `JevFatal`, `JevBudgetExceeded`, `RequestExhausted`, `ProviderError`, `ProviderFatal` |

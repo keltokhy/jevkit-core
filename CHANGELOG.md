@@ -26,6 +26,11 @@ Part of the run-layer plan ([#14](https://github.com/keltokhy/jevkit-core/issues
   that answered, every distinct question as asked (the meter now notes them), usage, budget, an input
   `fingerprint` and the tool's own `fields`, as versioned JSON; `run.warnings` names accidental model
   mixing and refused requests.
+- `jevkit_runtime.stream` ([#12](https://github.com/keltokhy/jevkit-core/issues/12)): `ordered_map`
+  judges records as a reader thread yields them (so `tail -f` works), keeps at most `concurrency`
+  records in hand counting those waiting their turn, returns results in input order or as they finish,
+  and on leaving early stops the reader, closes it and cancels what is in flight. `open_text` reads a
+  file or standard input through a descriptor of its own.
 - `jevkit_runtime.cli` ([#11](https://github.com/keltokhy/jevkit-core/issues/11)): the flags every tool
   shares, with `--budget none` for no limit and `--budget 0` for cache only; provider help generated
   from the catalog (providers gain a `title`); `runtime_from_args`, `stats_line`, `show_stats`, and

@@ -17,11 +17,13 @@ import itertools
 import multiprocessing as mp
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from multiprocessing.connection import wait
+from queue import Empty
 
 import httpx
 
 from . import transport
-from .errors import JevError
+from .errors import JevError, JevFatal
 
 
 def _serve(headers: dict, http2: bool, per_worker: int, priority_q, background_q, out_q) -> None:
@@ -87,7 +89,11 @@ def _portable(error: Exception) -> Exception:
 
 
 class Workers:
-    """A pool of sending processes owned by one client. Started on first use, or by `start`."""
+    """A pool of sending processes owned by one client. Started on first use, or by `start`.
+
+    A worker that dies fails the jobs still waiting on the pool, and the next request starts a fresh one.
+    A caller that stops waiting leaves its job to finish in the worker; `on_late` hears how it ended.
+    """
 
     def __init__(self, count: int, *, per_worker: int, headers: dict, http2: bool):
         if count < 1 or per_worker < 1:
@@ -95,8 +101,10 @@ class Workers:
         self.count, self.per_worker, self.headers, self.http2 = count, per_worker, headers, http2
         self._ids = itertools.count()
         self._pending: dict[int, asyncio.Future] = {}
+        self._late: dict[int, object] = {}  # job id -> on_late, for jobs whose caller stopped waiting
         self._started: asyncio.Future | None = None
         self._processes: list = []
+        self._stopping = False
 
     async def start(self) -> None:
         if self._started is None:
@@ -104,7 +112,13 @@ class Workers:
             try:
                 await self._spawn()
             except BaseException as error:
-                self._started.set_exception(error)
+                started, self._started = self._started, None  # a later request may try again
+                self._terminate()
+                if isinstance(error, asyncio.CancelledError):
+                    started.cancel()
+                else:
+                    started.set_exception(error)
+                    started.exception()  # retrieved: nobody else may be waiting on it
                 raise
             self._started.set_result(None)
         await asyncio.shield(self._started)
@@ -113,6 +127,7 @@ class Workers:
         context = mp.get_context("spawn")
         self._priority, self._background, self._out = context.Queue(), context.Queue(), context.Queue()
         loop, ready, seen = asyncio.get_running_loop(), asyncio.Event(), 0
+        self._stopping, failed = False, []
 
         def deliver(kind, job_id, payload, retries) -> None:
             nonlocal seen
@@ -121,21 +136,58 @@ class Workers:
                 if seen == self.count:
                     ready.set()
                 return
+            if (on_late := self._late.pop(job_id, None)) is not None:
+                on_late(kind, payload)
+                return
             future = self._pending.pop(job_id, None)
             if future is not None and not future.done():  # else its caller stopped waiting
                 future.set_result((kind, payload, retries))
 
-        def pump() -> None:
-            while (item := self._out.get()) is not None:
+        def died() -> None:
+            if self._stopping:
+                return
+            if not ready.is_set():  # it never started: _spawn fails and start() cleans up
+                failed.append(True)
+                ready.set()
+                return
+            self._fail("a worker process stopped")
+            self._terminate()
+            self._started = None  # the next request starts a fresh pool
+
+        def pump(out) -> None:
+            while (item := out.get()) is not None:
                 loop.call_soon_threadsafe(deliver, *item)
+
+        def watch(processes) -> None:
+            wait([p.sentinel for p in processes])
+            loop.call_soon_threadsafe(died)
 
         args = (self.headers, self.http2, self.per_worker, self._priority, self._background, self._out)
         self._processes = [context.Process(target=_serve, args=args, daemon=True) for _ in range(self.count)]
         for process in self._processes:
             process.start()
-        self._pump = threading.Thread(target=pump, daemon=True)
-        self._pump.start()
+        threading.Thread(target=pump, args=(self._out,), daemon=True).start()
+        threading.Thread(target=watch, args=(list(self._processes),), daemon=True).start()
         await ready.wait()
+        if failed:
+            raise JevFatal(
+                "the worker processes could not start; run the script under if __name__ == '__main__'"
+            )
+
+    def _fail(self, message: str) -> None:
+        for future in self._pending.values():
+            if not future.done():
+                future.set_result(("error", JevError(message), 0))
+        self._pending.clear()
+        for on_late in self._late.values():
+            on_late("error", JevError(message))
+        self._late.clear()
+
+    def _terminate(self) -> None:
+        for process in self._processes:
+            if process.is_alive():
+                process.terminate()
+        self._processes = []
 
     async def post(
         self,
@@ -147,6 +199,7 @@ class Workers:
         attempts: int,
         on_retry=None,
         priority: bool = False,
+        on_late=None,
     ) -> dict:
         """`transport.post`, in a worker: the decoded response, or the same error it would raise."""
         await self.start()
@@ -158,6 +211,10 @@ class Workers:
         )
         try:
             kind, payload, retries = await future
+        except asyncio.CancelledError:
+            if on_late is not None and self._pending.pop(job_id, None) is not None:
+                self._late[job_id] = on_late  # it is still being sent; hear how it ends
+            raise
         finally:
             self._pending.pop(job_id, None)
         for _ in range(retries if on_retry is not None else 0):
@@ -169,18 +226,19 @@ class Workers:
     async def close(self) -> None:
         if self._started is None or not self._processes:
             return
+        self._stopping = True
+        for queue in (self._priority, self._background):
+            try:
+                while True:
+                    queue.get_nowait()  # jobs nobody has started are dropped, not sent
+            except Empty:
+                pass
         for _ in self._processes:
             self._priority.put(None)
             self._background.put(None)
         loop = asyncio.get_running_loop()
-        for process in self._processes:
-            await loop.run_in_executor(None, process.join, 2)
-            if process.is_alive():
-                process.terminate()
+        await asyncio.gather(*(loop.run_in_executor(None, p.join, 2) for p in self._processes))
+        self._terminate()
         self._out.put(None)
-        for future in self._pending.values():
-            if not future.done():
-                future.set_result(("error", JevError("the client closed while a request was in a worker"), 0))
-        self._pending.clear()
-        self._processes = []
+        self._fail("the client closed while a request was in a worker")
         self._started = None

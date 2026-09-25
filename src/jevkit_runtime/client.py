@@ -6,7 +6,7 @@ import asyncio
 import importlib.util
 import json
 import math
-from collections.abc import Callable, Coroutine, Iterable, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -149,6 +149,9 @@ class Client:
         self.http2 = transport is None and http2_available()
         self.meter = Meter(provider=backend.name, requested_model=backend.model)
         self._flights: dict[str, asyncio.Task[Flight]] = {}
+        self._flight_priority: dict[str, bool] = {}
+        self._hedges: dict[str, asyncio.Task[Flight]] = {}
+        self._slots: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
         self._http: httpx.AsyncClient | None = None
         if workers and transport is not None:
             raise ValueError("a test transport runs in this process; it cannot be used with workers")
@@ -199,7 +202,7 @@ class Client:
 
     async def close(self) -> None:
         """Stop requests still in the air that no caller waits for, then the connections and workers."""
-        flights = list(self._flights.values())
+        flights = [*self._flights.values(), *self._hedges.values()]
         for task in flights:
             task.cancel()
         await asyncio.gather(*flights, return_exceptions=True)
@@ -375,6 +378,14 @@ class Client:
             raise ValueError("ask at least one question")
         if unslotted := [qid for qid, q in questions.items() if SLOT not in q.instructions]:
             raise ValueError(f"packed questions must name their slot as {SLOT}: {', '.join(unslotted)}")
+        if (
+            max_items is None
+            and self.backend.max_request_tokens is None
+            and self.backend.max_read_tokens is None
+        ):
+            raise ValueError(
+                f"{self.backend.name} publishes no request limits; say how many items a call may carry"
+            )
         questions = dict(questions)
         by_item = reuse == "item" and not self.backend.joint_reads
         entries = list(items.items())
@@ -460,8 +471,9 @@ class Client:
         priority: bool = False,
         budget: Budget | None = None,
     ) -> PackedAnswers:
-        """Send a packed plan's calls together. A failed call's items get its error instead of answers;
-        a fatal error stops the run and is raised once every call has finished."""
+        """Send a packed plan's calls together, no more at once than the client's concurrency. A call that
+        fails with a runtime error (or finds no room in the budget) gives its items that error instead of
+        answers; anything else, a fatal error included, is raised once every call has finished."""
         for question in plan.questions.values():
             self.meter.note_question(question)
         answers = {item: dict(found) for item, found in plan.hits.items()}
@@ -475,12 +487,16 @@ class Client:
             *(self._send(call.plan, hedge_after, priority, budget, note=False) for call in plan.calls),
             return_exceptions=True,
         )
-        fatal = next(
-            (r for r in results if isinstance(r, BaseException) and not isinstance(r, Exception)), None
+        stop = next(
+            (
+                r
+                for r in results
+                if isinstance(r, BaseException) and not isinstance(r, (JevError, JevBudgetExceeded))
+            ),
+            None,
         )
-        fatal = fatal or next((r for r in results if isinstance(r, JevFatal)), None)
-        if fatal is not None:
-            raise fatal
+        if stop is not None:
+            raise stop
         for call, result in zip(plan.calls, results, strict=True):
             for slot, item in call.slots.items():
                 if isinstance(result, Exception):
@@ -492,6 +508,8 @@ class Client:
         for item, twin in plan.twins.items():
             if twin in answers:
                 answers[item], origins[item] = answers[twin], origins[twin]
+                for _ in plan.questions:
+                    self.meter.note_answer(origins[item])
             elif twin in errors:
                 errors[item] = errors[twin]
         return PackedAnswers(
@@ -523,65 +541,97 @@ class Client:
 
     # ---- sending ----------------------------------------------------------------------------------
 
+    def _slot(self) -> asyncio.Semaphore:
+        """The client's `concurrency`, bounding requests in the air in this process, for this event loop."""
+        loop = asyncio.get_running_loop()
+        if self._slots is None or self._slots[0] is not loop:
+            self._slots = (loop, asyncio.Semaphore(self.concurrency))
+        return self._slots[1]
+
     async def _fetch(
         self, state, questions: Mapping[str, Question], keys: Mapping[str, str], hedge_after, priority, budget
     ) -> tuple[dict[str, tuple[dict, dict]], bool]:
         """Answers for `questions` by id, each with its origin, and whether this caller sent the request."""
         send_keys = {qid: keys[qid] for qid in questions}
         body = request_body(self.backend.model, state, questions)
-
-        def start() -> Coroutine[Any, Any, Flight]:
-            hold = budget.reserve(self.backend, estimate_tokens(body))  # raises when it does not fit
-            return self._request(body, questions, send_keys, hold, priority)
-
-        task, owner = self._share(send_keys.values(), start)
+        flight = "|".join(sorted(send_keys.values()))
+        task, owner = self._share(
+            flight, priority, lambda: self._flight(budget, body, questions, send_keys, priority)
+        )
+        if priority and not self._flight_priority.get(flight, True):
+            hedge_after = 0.0  # a person is waiting: do not queue behind the background lane
         if hedge_after is None:
             # Shielded: a caller that stops waiting must not cancel a request others share.
             by_key, origin = await asyncio.shield(task)
         else:
             by_key, origin = await self._hedged(
-                task, hedge_after, body, questions, send_keys, priority, budget
+                flight, task, hedge_after, budget, body, questions, send_keys, priority
             )
         return {qid: (by_key[key], dict(origin)) for qid, key in send_keys.items()}, owner
 
-    def _share(self, keys: Iterable[str], start: Callable[[], Coroutine[Any, Any, Flight]]):
+    async def _flight(self, budget: Budget, body, questions, keys, priority) -> Flight:
+        """One shared request: a slot, then room in the budget, then the call."""
+        if priority or self._workers is not None:
+            hold = await budget.reserve(self.backend, estimate_tokens(body))
+            return await self._request(body, questions, keys, hold, priority)
+        async with self._slot():
+            hold = await budget.reserve(self.backend, estimate_tokens(body))
+            return await self._request(body, questions, keys, hold, priority)
+
+    def _share(self, flight: str, priority: bool, start: Callable[[], Coroutine[Any, Any, Flight]]):
         """Join an identical in-flight request, or start one. Only the starter pays."""
-        flight = "|".join(sorted(keys))
         if (task := self._flights.get(flight)) is not None:
             self.meter.cached += 1
             return task, False
         task = asyncio.ensure_future(start())
         self._flights[flight] = task
+        self._flight_priority[flight] = priority
 
         def discard(done):
             if self._flights.get(flight) is done:
                 del self._flights[flight]
+                self._flight_priority.pop(flight, None)
 
         task.add_done_callback(discard)
         return task, True
 
-    async def _hedged(self, first, after, body, questions, keys, priority, budget) -> Flight:
+    async def _hedged(self, flight, first, after, budget, body, questions, keys, priority) -> Flight:
+        """The first answer of the shared request or of one second copy per flight, sent if the budget has
+        room for it now; neither is cancelled on this caller's account."""
         done, _ = await asyncio.wait({first}, timeout=after)
         if done:
             return first.result()
-        try:
-            hold = budget.reserve(self.backend, estimate_tokens(body))
-        except JevBudgetExceeded:
-            return await asyncio.shield(first)  # no room for a second copy; wait for the first
-        second = asyncio.ensure_future(self._request(body, questions, keys, hold, priority))
-        self.meter.hedges += 1
+        second = self._hedges.get(flight)
+        if second is None:
+            hold = budget.try_reserve(self.backend, estimate_tokens(body))
+            if hold is None:
+                return await asyncio.shield(first)  # no room for a copy; wait for the first
+            second = asyncio.ensure_future(self._request(body, questions, keys, hold, priority))
+            self._hedges[flight] = second
+            self.meter.hedges += 1
+
+            def forget(done):
+                if self._hedges.get(flight) is done:
+                    del self._hedges[flight]
+
+            second.add_done_callback(forget)
+
+            def spare(done):  # the first answered: the copy is no longer worth waiting for
+                if not done.cancelled() and done.exception() is None and not second.done():
+                    second.cancel()
+
+            first.add_done_callback(spare)
         pending = {first, second}
         error: BaseException | None = None
-        try:
-            while pending:
-                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-                for task in done:
-                    if task.exception() is None:
-                        return task.result()
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                if task.cancelled():
+                    error = error or asyncio.CancelledError()
+                elif task.exception() is None:
+                    return task.result()
+                else:
                     error = task.exception()
-        finally:
-            if not second.done():
-                second.cancel()  # never cancel `first`: other callers may be sharing it
         assert error is not None
         raise error
 
@@ -606,6 +656,7 @@ class Client:
                     attempts=self.attempts,
                     on_retry=retry,
                     priority=priority,
+                    on_late=lambda kind, payload: self._late(kind, payload, questions, keys, hold),
                 )
             else:
                 data = await transport.post(
@@ -617,9 +668,18 @@ class Client:
                     attempts=self.attempts,
                     on_retry=retry,
                 )
-        except BaseException:
-            hold.release()  # failed, refused or cancelled before any charge came back
+        except asyncio.CancelledError:
+            if self._workers is None:
+                # It may already have been sent and billed; the budget counts its estimate to be safe.
+                # (A worker's request finishes regardless, and `_late` settles it when it comes back.)
+                hold.settle(hold.amount)
             raise
+        except BaseException:
+            hold.release()  # refused or failed before any charge came back
+            raise
+        return self._answered(data, questions, keys, hold)
+
+    def _answered(self, data: dict, questions, keys, hold: Hold) -> Flight:
         try:
             usage = parse_usage(data.get("usage"), price_per_mtok=self.backend.price_per_mtok)
         except JevFatal:
@@ -633,3 +693,13 @@ class Client:
             for qid, answer in answers.items():
                 self.store.put(keys[qid], answer, origin)
         return {keys[qid]: answer for qid, answer in answers.items()}, origin
+
+    def _late(self, kind: str, payload, questions, keys, hold: Hold) -> None:
+        """A worker's answer to a request its caller stopped waiting for: still metered, charged and kept."""
+        if kind != "ok":
+            hold.release()
+            return
+        try:
+            self._answered(payload, questions, keys, hold)
+        except (JevError, JevFatal):
+            pass

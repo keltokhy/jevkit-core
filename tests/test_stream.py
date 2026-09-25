@@ -191,3 +191,29 @@ def test_finish_reads_nothing_more_but_returns_every_record_in_hand():
 
     taken = run(exercise())
     assert taken == sorted(started) and taken[:2] == [0, 1] and len(taken) < 20
+
+
+def test_a_reader_that_fails_before_its_first_record_still_ends_the_stream(tmp_path):
+    async def judge(n):
+        return n
+
+    async def exercise():
+        async with ordered_map(lambda stop: open(tmp_path / "missing"), judge, concurrency=2) as results:
+            return [outcome async for outcome in results]
+
+    outcomes = run(exercise())
+    assert len(outcomes) == 1 and outcomes[0].item is None and isinstance(outcomes[0].error, OSError)
+
+
+def test_a_cancellation_from_inside_a_judge_is_that_record_s_failure():
+    async def judge(n):
+        if n == 1:
+            raise asyncio.CancelledError()
+        return n
+
+    async def exercise():
+        async with ordered_map(reading(range(3)), judge, concurrency=2) as results:
+            return [outcome async for outcome in results]
+
+    outcomes = run(exercise())
+    assert [o.item for o in outcomes] == [0, 1, 2] and isinstance(outcomes[1].error, asyncio.CancelledError)

@@ -2,21 +2,24 @@
 
 A request is priced before it is sent, from its own size (`protocol.estimate_tokens`), at the dearest
 rate per estimated token its backend has charged so far, and at MARGIN times the list price until a
-charge has been seen. It goes out only if that fits beside what is spent and what the requests already
-in the air hold. So a budget is overshot only when a price rises while requests are in the air, and
-`rises` counts that.
+charge has been seen. It goes out only when that fits beside what is spent and what the requests already
+in the air hold. Reservations wait their turn, first come first served: one that does not fit waits for
+money held elsewhere to come back, and is refused only when nothing is held and it still does not fit.
+So the limit is passed only when a price rises while requests are in the air, and `rises` counts that.
 
 The limit is the tool's to choose; `math.inf` is no limit, and 0 allows only answers that cost nothing:
 the store, a request already in flight, or a server that charges no fees.
 
 A unit of work that must be done whole or not at all, such as every comparison of one text, takes an
-allotment first: `with budget.allot(amount) as share:` sets `amount` aside, refusing when it does not
-fit, and requests sent with `budget=share` draw on it. What is left goes back when the share closes.
+allotment first: `share = await budget.allot(amount)` sets `amount` aside, waiting for room like a
+request, and requests sent with `budget=share` draw on it. What is left goes back when the share closes.
 """
 
 from __future__ import annotations
 
+import asyncio
 import math
+from collections import deque
 from dataclasses import dataclass
 
 from .errors import JevBudgetExceeded
@@ -52,7 +55,7 @@ class Hold:
         """The request was never charged."""
         if self.open:
             self.open = False
-            self.budget._free(self)
+            self.budget._free(self.amount)
 
 
 class Budget:
@@ -64,10 +67,11 @@ class Budget:
         self.limit = float(limit)
         self.spent = 0.0
         self.held = 0.0
-        self._open = 0  # holds not yet settled or released
+        self._open = 0  # holds and shares not yet settled, released or returned
         self.rates: dict[str, float] = {}  # dollars per estimated token, the dearest each backend charged
         self.rises = 0
         self.refused = 0
+        self._waiting: deque[tuple[asyncio.Future, object, object]] = deque()  # (future, price, make)
         self._parent: Budget | None = None
         self._closing = False
 
@@ -91,42 +95,53 @@ class Budget:
 
     @property
     def exhausted(self) -> bool:
-        """Whether a request has been turned away."""
+        """Whether a request or an allotment has been turned away."""
         return self.refused > 0
 
     def price(self, backend: Backend, tokens: int) -> float:
+        """What a request of `tokens` estimated tokens would set aside now."""
         return tokens * self._rate(backend)
 
     def _rate(self, backend: Backend) -> float:
         learned = self.rates.get(_rate_key(backend))
         return learned if learned is not None else backend.price_per_mtok / 1e6 * MARGIN
 
-    def _refuse(self, amount: float, what: str) -> None:
-        if amount > 0 and amount > self.remaining:
-            self.refused += 1
-            raise JevBudgetExceeded(
-                f"the ${self.limit:.2f} budget has ${self.remaining:.4f} left; "
-                f"{what} would need about ${amount:.4f}"
-            )
+    def _fits(self, amount: float) -> bool:
+        remaining = self.remaining  # an amount equal to what is left, but for roundoff, fits
+        return amount <= 0 or amount <= remaining or math.isclose(amount, remaining, rel_tol=1e-9)
 
-    def reserve(self, backend: Backend, tokens: int) -> Hold:
-        """Set aside the price of a request, or raise JevBudgetExceeded when it does not fit."""
+    # ---- reserving ----------------------------------------------------------------------------------
+
+    async def reserve(self, backend: Backend, tokens: int) -> Hold:
+        """Set aside the price of a request, waiting in line for room; JevBudgetExceeded when nothing is
+        held that could come back and it still does not fit."""
         if self._closing:
             raise ValueError("this share of the budget has been closed")
+        # Priced when granted, not when it joins the line, so a charge seen meanwhile sets the rate.
+        return await self._take(
+            lambda: self.price(backend, tokens),
+            lambda amount: Hold(self, backend, tokens, self._rate(backend), amount),
+        )
+
+    def try_reserve(self, backend: Backend, tokens: int) -> Hold | None:
+        """A hold now if there is room and nobody is waiting, else None, never a refusal: for extras such
+        as a hedge, which a run can do without."""
         rate = self._rate(backend)
         amount = tokens * rate
-        self._refuse(amount, "the next request")
-        self.held += amount
-        self._open += 1
+        if self._closing or self._waiting or not self._fits(amount):
+            return None
+        self._grant(amount)
         return Hold(self, backend, tokens, rate, amount)
 
-    def allot(self, amount: float) -> Budget:
-        """A share of this budget for one unit of work, or JevBudgetExceeded when `amount` does not fit.
+    async def allot(self, amount: float) -> Budget:
+        """A share of this budget for one unit of work, waiting in line for room like a request.
 
         Requests sent with `budget=share` draw on the share, share this budget's learned prices, and are
         spending here too. Closing the share (or leaving its `with` block) returns what it did not use,
-        once its last request has settled.
+        once its last request has settled. A share cannot itself be divided.
         """
+        if self._parent is not None:
+            raise ValueError("a share of a budget cannot be divided further")
         if (
             isinstance(amount, bool)
             or not isinstance(amount, (int, float))
@@ -134,13 +149,70 @@ class Budget:
             or amount < 0
         ):
             raise ValueError("an allotment is a nonnegative number of dollars")
-        self._refuse(amount, "this allotment")
-        share = Budget(math.inf if self.unlimited else amount)
-        share.rates, share._parent = self.rates, self
+
+        def share(amount: float) -> Budget:
+            child = Budget(math.inf if self.unlimited else amount)
+            child.rates, child._parent = self.rates, self
+            return child
+
+        return await self._take(lambda: float(amount), share)
+
+    async def _take(self, price, make):
+        amount = price()
+        if not self._waiting and self._fits(amount):
+            self._grant(amount)
+            return make(amount)
+        if not self._waiting and not self._open:
+            self._refuse(amount)
+        future = asyncio.get_running_loop().create_future()
+        self._waiting.append((future, price, make))
+        try:
+            return await future
+        except asyncio.CancelledError:
+            if future.done() and not future.cancelled() and future.exception() is None:
+                granted = future.result()  # granted just as its caller stopped waiting: give it back
+                if isinstance(granted, Hold):
+                    granted.release()
+                else:
+                    granted.close()
+            raise
+        finally:
+            self._wake()
+
+    def _grant(self, amount: float) -> None:
         if not self.unlimited:
             self.held += amount
         self._open += 1
-        return share
+
+    def _refuse(self, amount: float) -> None:
+        self.refused += 1
+        raise JevBudgetExceeded(
+            f"the ${self.limit:.2f} budget has ${self.remaining:.4f} left and nothing in the air to come "
+            f"back; the next request would need about ${amount:.4f}"
+        )
+
+    def _wake(self) -> None:
+        """Serve the line in order: grant what fits, refuse what cannot fit with nothing left to come back."""
+        while self._waiting:
+            future, price, make = self._waiting[0]
+            if future.done():
+                self._waiting.popleft()
+                continue
+            amount = price()
+            if self._fits(amount):
+                self._waiting.popleft()
+                self._grant(amount)
+                future.set_result(make(amount))
+                continue
+            if self._open:
+                return  # money is in the air; the head of the line waits for it
+            self._waiting.popleft()
+            try:
+                self._refuse(amount)
+            except JevBudgetExceeded as refusal:
+                future.set_exception(refusal)
+
+    # ---- returning ----------------------------------------------------------------------------------
 
     def close(self) -> None:
         """Give an allotment's unused part back to its budget, now or when its last request settles."""
@@ -157,17 +229,14 @@ class Budget:
 
     def _return(self) -> None:
         parent = self._parent
-        parent._open -= 1
-        if parent.unlimited:
-            return
-        left = max(0.0, self.limit - self.spent)
-        parent.held = parent.held - left if parent._open else 0.0
+        parent._free(0.0 if parent.unlimited else max(0.0, self.limit - self.spent))
 
-    def _free(self, hold: Hold) -> None:
+    def _free(self, amount: float) -> None:
         self._open -= 1
-        self.held = self.held - hold.amount if self._open else 0.0  # no drift once nothing is held
+        self.held = self.held - amount if self._open else 0.0  # no drift once nothing is held
         if self._closing and not self._open:
             self._return()
+        self._wake()
 
     def _settle(self, hold: Hold, cost: float) -> None:
         before = self.spent
@@ -184,7 +253,7 @@ class Budget:
             parent.spent += cost
             if not parent.unlimited:  # what the share had set aside is spent, not held
                 parent.held -= min(cost, max(0.0, self.limit - before))
-        self._free(hold)
+        self._free(hold.amount)
 
     def summary(self) -> str:
         if self.unlimited:

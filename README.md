@@ -35,10 +35,12 @@ to resend a slow call. HTTP/2 is used whenever the `http2` extra is installed.
 Spending belongs to a `Budget` shared by the run, `Client(backend, budget=Budget(1.0))`. Before a
 request goes out it reserves the request's estimated price, at the dearest rate its backend has
 charged so far (1.5 times the list price until the first charge), and when the charge comes back it
-settles it. A request that does not fit raises `JevBudgetExceeded`, while the store and a request
-already in flight still answer, so requests in the air cannot overshoot the limit together; only a
+settles it. Reservations wait in line for money held elsewhere to come back, and one is refused with
+`JevBudgetExceeded` only when nothing is held and it still does not fit; the store and a request
+already in flight still answer. So requests in the air cannot overshoot the limit together; only a
 price rise mid-flight can, and `Budget.rises` counts it. `Budget(0)` allows only what costs nothing,
-and `Budget.from_settings(default)` honours `JEV_BUDGET`.
+`Budget.from_settings(default)` honours `JEV_BUDGET`, and `await budget.allot(amount)` sets money
+aside for a unit of work that must be done whole, whose requests pass `budget=share`.
 
 `ask` is `plan` then `send`. `Client.plan` reads the store without sending or writing anything: the
 hits, the misses, the request those would make, and whether it is over the provider's limits. An

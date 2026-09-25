@@ -385,7 +385,7 @@ def test_several_questions_per_item_and_a_shared_context_travel_in_one_call():
     async def exercise():
         async with fake.client() as client:
             answers = await client.ask_packed(
-                {"a": "x", "b": "y"}, questions, context="complaints about banks"
+                {"a": "x", "b": "y"}, questions, context="complaints about banks", max_items=8
             )
             body = fake.bodies[0]
             assert body["state"] == {"context": "complaints about banks", "items": {"p0": "x", "p1": "y"}}
@@ -440,3 +440,72 @@ def test_one_requested_model_answered_by_several_is_flagged():
         {"provider": "typesafe", "requested_model": "jev-1.13.0", "resolved_model": "jev-1.14.0"}
     )
     assert meter.mixed_models == {"typesafe/jev-1.13.0": ["jev-1.13.0", "jev-1.14.0"]}
+
+
+def test_a_packed_plan_needs_a_width_where_the_provider_publishes_no_limits():
+    with pytest.raises(ValueError, match="publishes no request limits"):
+        Client(BACKEND).plan_packed({"a": "x"}, RELEVANT)
+
+
+def test_packed_calls_go_out_no_more_at_once_than_the_client_s_concurrency():
+    in_air = peak = 0
+
+    async def respond(request):
+        nonlocal in_air, peak
+        in_air += 1
+        peak = max(peak, in_air)
+        await asyncio.sleep(0.01)
+        in_air -= 1
+        body = json.loads(request.content)
+        return httpx.Response(200, json={"answers": {q: {"noul": 0.5} for q in body["questions"]}})
+
+    async def exercise():
+        async with Client(BACKEND, concurrency=3, transport=httpx.MockTransport(respond)) as client:
+            items = {f"i{n}": f"text {n}" for n in range(30)}
+            answers = await client.ask_packed(items, RELEVANT, max_items=1)
+            assert len(answers) == 30 and client.meter.calls == 30
+
+    run(exercise())
+    assert peak <= 3
+
+
+def test_a_priority_caller_does_not_wait_behind_a_background_request_and_twins_are_metered():
+    calls = []
+
+    async def respond(request):
+        calls.append(request.content)
+        if len(calls) == 1:
+            await asyncio.sleep(5)  # the background request is slow
+        body = json.loads(request.content)
+        return httpx.Response(200, json={"answers": {q: {"noul": 0.5} for q in body["questions"]}})
+
+    async def exercise():
+        async with Client(BACKEND, transport=httpx.MockTransport(respond)) as client:
+            background = asyncio.create_task(client.ask("row", QUESTIONS))
+            await asyncio.sleep(0.01)
+            urgent = await asyncio.wait_for(client.ask("row", QUESTIONS, priority=True), 1)
+            assert urgent["q"] == {"noul": 0.5} and client.meter.hedges == 1
+            background.cancel()
+            await asyncio.gather(background, return_exceptions=True)
+            before = sum(p["count"] for p in client.meter.answer_provenance)
+            twins = await client.ask_packed({"a": "same", "b": "same"}, RELEVANT, reuse="item", max_items=2)
+            assert twins["a"] == twins["b"]
+            assert sum(p["count"] for p in client.meter.answer_provenance) - before == 2
+
+    run(exercise())
+
+
+def test_a_hedge_the_budget_has_no_room_for_is_skipped_without_counting_a_refusal():
+    async def respond(request):
+        await asyncio.sleep(0.05)
+        return httpx.Response(200, json={"answers": {"q": {"noul": 0.9}}, "usage": {"cost": 0.0}})
+
+    async def exercise():
+        one = Client(BACKEND).plan("s", {"q": QUESTIONS["q"]}).cost * 1.5
+        async with Client(
+            BACKEND, budget=Budget(one * 1.2), transport=httpx.MockTransport(respond)
+        ) as client:
+            await client.ask("s", {"q": QUESTIONS["q"]}, hedge_after=0.01)
+            assert client.meter.hedges == 0 and not client.budget.exhausted
+
+    run(exercise())

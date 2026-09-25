@@ -50,8 +50,19 @@ Part of the run-layer plan ([#14](https://github.com/keltokhy/jevkit-core/issues
   limit together. `Client(budget=...)` replaces `allow_paid=` and `on_cost=`; `Budget(0)` allows only
   what costs nothing. `JEV_BUDGET` (dollars, or `none`) overrides a tool's default. `Plan` carries the
   estimated `tokens` and `cost` of its request.
-  `budget.allot(amount)` sets money aside for a unit of work that must be done whole (every comparison
-  of one text), and `ask(..., budget=share)` draws on it; what it does not use goes back when it closes.
+  Reservations wait in line, first come first served, for money held elsewhere to come back, and are
+  refused only when nothing is held and they still do not fit; a waiting request is priced when it is
+  granted, at the rate known by then. `await budget.allot(amount)` sets money aside for a unit of work
+  that must be done whole (every comparison of one text), and `ask(..., budget=share)` draws on it.
+  Hedges take room only if it is free and never count as a refusal.
+- Requests in this process are bounded by the client's `concurrency` (priority requests excepted), so
+  packed fan-out cannot swamp a connection pool; a priority caller joining a background request sends a
+  priority copy instead of queueing behind it.
+- A cancelled in-process request counts its estimate against the budget, since it may have been billed;
+  a worker's request whose caller stopped waiting is metered, charged and stored when it comes back.
+- Workers: a process that dies fails the requests waiting on the pool, and the next request starts a
+  fresh pool; startup that cannot complete raises instead of hanging; `close` drops queued work and
+  joins the workers together.
 - Answer keys are v3, and order-sensitive: a state's fields and a question's options are keyed in the
   order they are sent. The store is `answers.v3.sqlite`, beside 0.3's `answers.sqlite`, so tools on
   either runtime share a cache directory; the first run after upgrading re-asks.

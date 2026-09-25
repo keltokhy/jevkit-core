@@ -91,8 +91,8 @@ def test_mixed_models_and_refused_requests_are_warnings():
         return run.record([first, second])
 
     record = run_sync(exercise())
-    assert record["mixed_models"] == {} and len(record["budget"]) == 1  # each meter saw one model
-    record["mixed_models"] = {"typesafe/jev-1.13.0": ["v1", "v2"]}
+    assert record["mixed_models"] == {"typesafe/jev-1.13.0": ["v1", "v2"]}  # across the run's clients
+    assert len(record["budget"]) == 1
     found = warnings(record)
     assert len(found) == 1 and "answered by 2 models (v1, v2)" in found[0]
     assert record["budget"][0]["refused"] == 1

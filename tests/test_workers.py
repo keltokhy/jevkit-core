@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from jevkit_runtime import AnswerStore, Backend, Budget, Client, JevFatal, Noul, ProviderFatal
+from jevkit_runtime import AnswerStore, Backend, Budget, Client, JevError, JevFatal, Noul, ProviderFatal
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -88,3 +88,39 @@ def test_workers_cannot_use_a_test_transport():
         Client(
             Backend("t", "https://x.invalid", "m"), workers=1, transport=httpx.MockTransport(lambda r: None)
         )
+
+
+class Slow(BaseHTTPRequestHandler):
+    def do_POST(self):
+        import time
+
+        self.rfile.read(int(self.headers["Content-Length"]))
+        time.sleep(10)
+
+    def log_message(self, *args):
+        pass
+
+
+def test_a_worker_that_dies_fails_its_callers_and_the_next_request_starts_a_fresh_pool(server):
+    import os
+    import signal
+
+    slow = ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    threading.Thread(target=slow.serve_forever, daemon=True).start()
+    hanging = Backend("gateway", f"http://127.0.0.1:{slow.server_address[1]}/v1", "m", key="k")
+
+    async def exercise():
+        async with Client(hanging, workers=1, timeout=30) as client:
+            await client.start()
+            asking = asyncio.create_task(client.ask("s", {"q": Noul("x")}))
+            await asyncio.sleep(0.5)
+            os.kill(client._workers._processes[0].pid, signal.SIGKILL)
+            with pytest.raises(JevError, match="worker process stopped"):
+                await asyncio.wait_for(asking, 10)
+            assert client.budget.held == 0
+            client.backend = Backend("gateway", f"{server}/v1/systemone", "m", key="k")
+            again = await asyncio.wait_for(client.ask("t", {"q": Noul("x")}), 30)
+            assert again["q"] == {"noul": 0.25}
+
+    asyncio.run(asyncio.wait_for(exercise(), 90))
+    slow.shutdown()

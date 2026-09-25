@@ -89,7 +89,7 @@ class Run:
                 for key, count in answered.items()
             ],
             "unknown_model_answers": sum(m.unknown_model_answers for m in meters),
-            "mixed_models": {k: v for m in meters for k, v in m.mixed_models.items()},
+            "mixed_models": _mixed(answered),
             "questions": [
                 {"digest": digest, "type": body["type"], "text": body["instructions"], "body": body}
                 for digest, body in questions.items()
@@ -116,6 +116,15 @@ class Run:
             "inputs": self.inputs,
             "fields": dict(fields or {}),
         }
+
+
+def _mixed(answered: dict[tuple, int]) -> dict[str, list[str]]:
+    """Requested models that more than one model answered, across every client of the run."""
+    seen: dict[str, set[str]] = {}
+    for provider, requested, resolved, _ in answered:
+        if resolved:
+            seen.setdefault(f"{provider}/{requested}", set()).add(resolved)
+    return {asked: sorted(models) for asked, models in seen.items() if len(models) > 1}
 
 
 def _added(counts: Iterable[dict[str, int]]) -> dict[str, int]:

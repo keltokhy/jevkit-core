@@ -115,20 +115,24 @@ class ordered_map(Generic[T, R]):  # noqa: N801 - used as a function
                 return False
             return not self._closed
 
-        items = iter(self._read(self.stop))
+        items = None
         try:
+            items = iter(self._read(self.stop))
             for item in items:
                 if self.stop.is_set():  # finish(): what was read before this is still judged
                     break
                 if not enqueue(item):
                     return
         except Exception as error:  # a reader failure ends the stream as its last outcome
-            if not enqueue(_ReadFailed(error)):
-                return
+            enqueue(_ReadFailed(error))
+            return  # the pump ends the stream after a failure
         finally:
-            if close := getattr(items, "close", None):
-                close()  # a generator's own cleanup, such as closing its files, runs now
-        enqueue(_END)
+            try:
+                if close := getattr(items, "close", None):
+                    close()  # a generator's own cleanup, such as closing its files, runs now
+            finally:
+                if not self._closed:
+                    enqueue(_END)  # whatever happened above, the stream ends
 
     # ---- the event loop -------------------------------------------------------------------------------
 
@@ -156,8 +160,10 @@ class ordered_map(Generic[T, R]):  # noqa: N801 - used as a function
     async def _run(self, n: int, item: T) -> None:
         try:
             outcome = Outcome(item, value=await self._judge(item))
-        except asyncio.CancelledError:
-            raise
+        except asyncio.CancelledError as error:
+            if self._closed:
+                raise  # the stream is closing: this record is not wanted
+            outcome = Outcome(item, error=error)  # a cancellation from inside the judge is its failure
         except BaseException as error:
             outcome = Outcome(item, error=error)
         self._deliver(n, outcome)

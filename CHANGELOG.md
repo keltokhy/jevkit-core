@@ -55,6 +55,9 @@ Part of the run-layer plan ([#14](https://github.com/keltokhy/jevkit-core/issues
   granted, at the rate known by then. `await budget.allot(amount)` sets money aside for a unit of work
   that must be done whole (every comparison of one text), and `ask(..., budget=share)` draws on it.
   Hedges take room only if it is free and never count as a refusal.
+  Under a limit, a priced backend's first request goes alone until its price is known, so a price far
+  from the estimate is learned from one request rather than paid on many. An allotment guarantees its
+  unit room rather than capping it: past the share, its requests draw on what the budget has free.
 - Requests in this process are bounded by the client's `concurrency` (priority requests excepted), so
   packed fan-out cannot swamp a connection pool; a priority caller joining a background request sends a
   priority copy instead of queueing behind it.

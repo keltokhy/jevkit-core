@@ -5,7 +5,9 @@ rate per estimated token its backend has charged so far, and at MARGIN times the
 charge has been seen. It goes out only when that fits beside what is spent and what the requests already
 in the air hold. Reservations wait their turn, first come first served: one that does not fit waits for
 money held elsewhere to come back, and is refused only when nothing is held and it still does not fit.
-So the limit is passed only when a price rises while requests are in the air, and `rises` counts that.
+Until a backend has charged anything, its first request goes alone, so a price far from the estimate is
+learned from one request rather than paid on many. So the limit is passed only when a price rises while
+requests are in the air, and `rises` counts that.
 
 The limit is the tool's to choose; `math.inf` is no limit, and 0 allows only answers that cost nothing:
 the store, a request already in flight, or a server that charges no fees.
@@ -46,6 +48,7 @@ class Hold:
     rate: float
     amount: float
     open: bool = True
+    probe: str | None = None
 
     def settle(self, cost: float) -> None:
         """The request was charged `cost`: spend it, free the hold, and learn the rate."""
@@ -57,6 +60,7 @@ class Hold:
         """The request was never charged."""
         if self.open:
             self.open = False
+            self.budget._unprobe(self.probe)
             self.budget._free(self.amount)
 
 
@@ -73,7 +77,10 @@ class Budget:
         self.rates: dict[str, float] = {}  # dollars per estimated token, the dearest each backend charged
         self.rises = 0
         self.refused = 0
-        self._waiting: deque[tuple[asyncio.Future, object, object]] = deque()  # (future, price, make)
+        self._waiting: deque[tuple[asyncio.Future, object, object, str | None]] = (
+            deque()
+        )  # (future, price, make, probe)
+        self._probing: dict[str, int] = {}  # backends with no charge seen yet -> their requests in the air
         self._parent: Budget | None = None
         self._closing = False
 
@@ -124,8 +131,19 @@ class Budget:
         # Priced when granted, not when it joins the line, so a charge seen meanwhile sets the rate.
         return await self._take(
             lambda: self.price(backend, tokens),
-            lambda amount: Hold(self, backend, tokens, self._rate(backend), amount),
+            lambda amount: Hold(
+                self, backend, tokens, self._rate(backend), amount, probe=self._probe_key(backend)
+            ),
+            self._probe_key(backend),
         )
+
+    def _probe_key(self, backend: Backend) -> str | None:
+        """The backend whose first request goes alone: under a limit, priced, and no charge seen yet."""
+        key = _rate_key(backend)
+        return key if not self.unlimited and backend.price_per_mtok > 0 and key not in self.rates else None
+
+    def _probe_clear(self, probe: str | None) -> bool:
+        return probe is None or probe in self.rates or not self._probing.get(probe)
 
     def try_reserve(self, backend: Backend, tokens: int) -> Hold | None:
         """A hold now if there is room and nobody is waiting, else None, never a refusal: for extras such
@@ -134,10 +152,11 @@ class Budget:
             return None if self._closing else self._draw(backend, tokens, refuse=False)
         rate = self._rate(backend)
         amount = tokens * rate
-        if self._closing or self._waiting or not self._fits(amount):
+        probe = self._probe_key(backend)
+        if self._closing or self._waiting or not self._fits(amount) or not self._probe_clear(probe):
             return None
-        self._grant(amount)
-        return Hold(self, backend, tokens, rate, amount)
+        self._grant(amount, probe)
+        return Hold(self, backend, tokens, rate, amount, probe=probe)
 
     def _draw(self, backend: Backend, tokens: int, *, refuse: bool) -> Hold | None:
         """A share's request: from the share while it lasts, then from what the budget has free right now.
@@ -176,15 +195,15 @@ class Budget:
 
         return await self._take(lambda: float(amount), share)
 
-    async def _take(self, price, make):
+    async def _take(self, price, make, probe: str | None = None):
         amount = price()
-        if not self._waiting and self._fits(amount):
-            self._grant(amount)
+        if not self._waiting and self._fits(amount) and self._probe_clear(probe):
+            self._grant(amount, probe)
             return make(amount)
         if not self._waiting and not self._open:
             self._refuse(amount)
         future = asyncio.get_running_loop().create_future()
-        self._waiting.append((future, price, make))
+        self._waiting.append((future, price, make, probe))
         try:
             return await future
         except asyncio.CancelledError:
@@ -198,10 +217,12 @@ class Budget:
         finally:
             self._wake()
 
-    def _grant(self, amount: float) -> None:
+    def _grant(self, amount: float, probe: str | None = None) -> None:
         if not self.unlimited:
             self.held += amount
         self._open += 1
+        if probe is not None:
+            self._probing[probe] = self._probing.get(probe, 0) + 1
 
     def _refuse(self, amount: float) -> None:
         self.refused += 1
@@ -213,14 +234,18 @@ class Budget:
     def _wake(self) -> None:
         """Serve the line in order: grant what fits, refuse what cannot fit with nothing left to come back."""
         while self._waiting:
-            future, price, make = self._waiting[0]
+            future, price, make, probe = self._waiting[0]
             if future.done():
                 self._waiting.popleft()
                 continue
+            if probe is not None and probe in self.rates:
+                probe = None  # priced since it joined the line
             amount = price()
+            if not self._probe_clear(probe):
+                return  # the backend's first request is out: learn its price before sending more
             if self._fits(amount):
                 self._waiting.popleft()
-                self._grant(amount)
+                self._grant(amount, probe)
                 future.set_result(make(amount))
                 continue
             if self._open:
@@ -257,7 +282,12 @@ class Budget:
             self._return()
         self._wake()
 
+    def _unprobe(self, probe: str | None) -> None:
+        if probe is not None and self._probing.get(probe):
+            self._probing[probe] -= 1
+
     def _settle(self, hold: Hold, cost: float) -> None:
+        self._unprobe(hold.probe)
         before = self.spent
         self.spent += cost
         if hold.tokens:

@@ -168,22 +168,45 @@ def test_a_share_closed_with_a_request_in_the_air_returns_its_rest_when_that_req
     run(exercise())
 
 
+def test_a_backend_s_first_request_goes_alone_until_its_price_is_known():
+    async def exercise():
+        budget = Budget(1.0)
+        probe = await budget.reserve(HOSTED, 1000)
+        waiting = asyncio.ensure_future(budget.reserve(HOSTED, 1000))
+        await asyncio.sleep(0)
+        assert not waiting.done() and budget.try_reserve(HOSTED, 1000) is None
+        probe.settle(0.01)  # far dearer than estimated: learned from one request
+        hold = await waiting
+        assert hold.amount == pytest.approx(0.01) and budget.rates
+        hold.release()
+        for unguarded in (Budget(), Budget(1.0)):
+            backend = HOSTED if unguarded.unlimited else LOCAL  # no limit, or no fees: nothing to learn
+            first = await unguarded.reserve(backend, 1000)
+            second = await asyncio.wait_for(unguarded.reserve(backend, 1000), 1)
+            first.release()
+            second.release()
+
+    run(exercise())
+
+
 def test_a_reservation_that_does_not_fit_waits_for_money_to_come_back_in_turn():
     async def exercise():
-        budget = Budget(3 * 1000 * 0.042e-6 * 1.5)
+        rate = 0.03e-6
+        budget = Budget(1000 * rate + 3 * 1000 * rate)
+        (await budget.reserve(HOSTED, 1000)).settle(1000 * rate)  # the price is learned first
         first = [await budget.reserve(HOSTED, 1000) for _ in range(3)]
         later = [asyncio.ensure_future(budget.reserve(HOSTED, 1000)) for _ in range(2)]
         await asyncio.sleep(0)
         assert not any(t.done() for t in later) and budget.refused == 0
-        first[0].settle(1000 * 0.03e-6)  # cheaper than reserved: room for the first in line
+        first[0].settle(0.0)  # charged nothing: room for exactly the first in line
         await asyncio.sleep(0)
         assert later[0].done() and not later[1].done()
         for hold in first[1:]:
-            hold.settle(1000 * 0.03e-6)
+            hold.settle(0.0)
         await asyncio.sleep(0)
         assert later[1].done()
-        (await later[0]).settle(1000 * 0.03e-6)
-        (await later[1]).settle(1000 * 0.03e-6)
+        (await later[0]).settle(0.0)
+        (await later[1]).settle(0.0)
         assert budget.refused == 0 and budget.held == 0
         big = asyncio.ensure_future(budget.reserve(HOSTED, 10**6))
         with pytest.raises(JevBudgetExceeded):

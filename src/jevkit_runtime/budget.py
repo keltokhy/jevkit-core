@@ -12,7 +12,9 @@ the store, a request already in flight, or a server that charges no fees.
 
 A unit of work that must be done whole or not at all, such as every comparison of one text, takes an
 allotment first: `share = await budget.allot(amount)` sets `amount` aside, waiting for room like a
-request, and requests sent with `budget=share` draw on it. What is left goes back when the share closes.
+request, and requests sent with `budget=share` draw on it. An allotment guarantees its unit room, not a
+ceiling: if prices rise, its requests go on to draw on whatever the budget has free, and are refused only
+when that is gone too. What is left goes back when the share closes.
 """
 
 from __future__ import annotations
@@ -117,6 +119,8 @@ class Budget:
         held that could come back and it still does not fit."""
         if self._closing:
             raise ValueError("this share of the budget has been closed")
+        if self._parent is not None:
+            return self._draw(backend, tokens, refuse=True)
         # Priced when granted, not when it joins the line, so a charge seen meanwhile sets the rate.
         return await self._take(
             lambda: self.price(backend, tokens),
@@ -126,12 +130,27 @@ class Budget:
     def try_reserve(self, backend: Backend, tokens: int) -> Hold | None:
         """A hold now if there is room and nobody is waiting, else None, never a refusal: for extras such
         as a hedge, which a run can do without."""
+        if self._parent is not None:
+            return None if self._closing else self._draw(backend, tokens, refuse=False)
         rate = self._rate(backend)
         amount = tokens * rate
         if self._closing or self._waiting or not self._fits(amount):
             return None
         self._grant(amount)
         return Hold(self, backend, tokens, rate, amount)
+
+    def _draw(self, backend: Backend, tokens: int, *, refuse: bool) -> Hold | None:
+        """A share's request: from the share while it lasts, then from what the budget has free right now.
+        It never queues behind other allotments, which may be waiting for this very share to close."""
+        rate = self._rate(backend)
+        amount = tokens * rate
+        for budget in (self, self._parent):
+            if budget._fits(amount):
+                budget._grant(amount)
+                return Hold(budget, backend, tokens, rate, amount)
+        if refuse:
+            self._refuse(amount)
+        return None
 
     async def allot(self, amount: float) -> Budget:
         """A share of this budget for one unit of work, waiting in line for room like a request.

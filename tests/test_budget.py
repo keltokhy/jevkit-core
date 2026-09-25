@@ -210,3 +210,24 @@ def test_sending_with_a_share_draws_on_it_and_an_unlimited_budget_allots_without
 
     run(exercise())
     assert len(bodies) == 1
+
+
+def test_a_share_guarantees_room_and_draws_on_what_the_budget_has_free_when_prices_rise():
+    async def exercise():
+        parent = Budget(1.0)
+        share = await parent.allot(0.001)
+        inside = await share.reserve(HOSTED, 1000)
+        assert inside.budget is share
+        overflow = await share.reserve(HOSTED, 100_000)  # past the share: the budget's free money
+        assert overflow.budget is parent and parent.held == pytest.approx(0.001 + overflow.amount)
+        overflow.settle(0.5)
+        inside.settle(0.0)
+        share.close()
+        assert parent.spent == pytest.approx(0.5) and parent.held == 0
+        greedy = await parent.allot(0.4)
+        with pytest.raises(JevBudgetExceeded):
+            await greedy.reserve(HOSTED, 10**8)  # more than the share and all the budget has free
+        assert greedy.try_reserve(HOSTED, 10**8) is None
+        greedy.close()
+
+    run(exercise())

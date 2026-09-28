@@ -1,6 +1,7 @@
 import asyncio
 import dataclasses
 import json
+import sqlite3
 
 import httpx
 import pytest
@@ -77,6 +78,28 @@ def test_a_request_is_sent_once_then_answered_from_the_store(tmp_path):
 
     run(exercise())
     store.close()
+
+
+def test_a_client_closes_a_store_it_opened_and_only_that(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    fake = Fake()
+
+    async def exercise(store):
+        async with fake.client(store=store) as client:
+            await client.ask("évidence", QUESTIONS)
+            return client.store
+
+    for opened in (True, tmp_path / "path.sqlite", str(tmp_path / "text.sqlite")):
+        store = run(exercise(opened))
+        with pytest.raises(sqlite3.ProgrammingError):  # closed with the client
+            store.get("any key")
+        with AnswerStore(store.path) as reopened:  # and its answers were kept
+            assert reopened.db.execute("SELECT COUNT(*) FROM answers").fetchone()[0] == 2
+    assert AnswerStore.default_path().parent == tmp_path / "xdg" / "jev"
+    with AnswerStore(tmp_path / "theirs.sqlite") as theirs:
+        assert run(exercise(theirs)) is theirs
+        assert theirs.db.execute("SELECT COUNT(*) FROM answers").fetchone()[0] == 2  # still open
+    assert run(exercise(None)) is None and run(exercise(False)) is None
 
 
 def test_only_missing_questions_are_sent_and_a_malformed_stored_answer_is_asked_again(tmp_path):

@@ -6,6 +6,7 @@ import asyncio
 import importlib.util
 import json
 import math
+import os
 from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -135,16 +136,23 @@ class Client:
         timeout: float = 15.0,
         attempts: int = 4,
         concurrency: int = 32,
-        store: AnswerStore | None = None,
+        store: AnswerStore | bool | str | os.PathLike | None = None,
         budget: Budget | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         workers: int = 0,
         per_worker: int = 64,
     ):
-        """`workers` sends requests from that many processes of its own; see `workers.py`."""
+        """`store` keeps answers: `True` or a path opens a store this client closes with itself, while a store
+        passed in stays the caller's to close. `workers` sends requests from that many processes of its own;
+        see `workers.py`."""
         self.backend = backend
         self.budget = budget if budget is not None else Budget()
-        self.timeout, self.attempts, self.store = timeout, attempts, store
+        self.timeout, self.attempts = timeout, attempts
+        self._owns_store = store is True or isinstance(store, (str, os.PathLike))
+        if self._owns_store:
+            self.store = AnswerStore() if store is True else AnswerStore(store)
+        else:
+            self.store = store or None
         self.concurrency, self.transport = concurrency, transport
         self.http2 = transport is None and http2_available()
         self.meter = Meter(provider=backend.name, requested_model=backend.model)
@@ -201,7 +209,8 @@ class Client:
             await self._workers.start()
 
     async def close(self) -> None:
-        """Stop requests still in the air that no caller waits for, then the connections and workers."""
+        """Stop requests still in the air that no caller waits for, then the connections, the workers, and a
+        store this client opened."""
         flights = [*self._flights.values(), *self._hedges.values()]
         for task in flights:
             task.cancel()
@@ -211,6 +220,8 @@ class Client:
             self._http = None
         if self._workers is not None:
             await self._workers.close()
+        if self._owns_store:
+            self.store.close()
 
     async def __aenter__(self) -> Client:
         return self

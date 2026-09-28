@@ -3,6 +3,12 @@
 `jevkit-runtime` is 0.x: a minor version may break the API. The JevKit tools pin `<0.(n+1)` so a
 new minor release never changes an installed tool.
 
+## Unreleased
+
+- `Client(store=True)` or `Client(store=path)` opens an answer store that the client closes with
+  itself; a store passed in stays the caller's to close, and `AnswerStore` is now a context manager.
+  Tools opened a store per run and never closed it, leaving SQLite connections to the garbage collector.
+
 ## 0.4.1
 
 - Requests are serialized by the runtime as compact UTF-8 JSON rather than by httpx's `json=`, so the

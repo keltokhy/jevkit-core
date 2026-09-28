@@ -3,7 +3,7 @@
 `jevkit-runtime` is 0.x: a minor version may break the API. The JevKit tools pin `<0.(n+1)` so a
 new minor release never changes an installed tool.
 
-## Unreleased
+## 0.4.1
 
 - Requests are serialized by the runtime as compact UTF-8 JSON rather than by httpx's `json=`, so the
   bytes on the wire no longer depend on the httpx version (0.27 escaped non-ASCII text and added spaces).

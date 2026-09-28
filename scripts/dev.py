@@ -105,7 +105,10 @@ def main():
             options = (
                 ["--extra", "code"] if name == "jgrep" else ["--group", "bench"] if name == "jlink" else []
             )
-            command(["uv", "sync", "--locked", *options], cwd=repo)
+            # A consumer installs what its lockfile pins, with this core in place of the version the lockfile
+            # records; with --locked, every core version bump would fail here until each consumer relocked.
+            # Each consumer's own CI still checks its lockfile.
+            command(["uv", "sync", "--locked" if name == "core" else "--frozen", *options], cwd=repo)
         if "jselect" in repos:
             env = os.environ | {"TIKTOKEN_CACHE_DIR": str(args.tokenizer_cache)}
             command(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import random
 import time
@@ -14,6 +15,16 @@ from .protocol import error_detail
 
 RETRYABLE = frozenset({408, 429, 500, 502, 503, 504, 529})
 FATAL = frozenset({401, 402, 403})
+JSON = {"Content-Type": "application/json"}
+
+
+def encode(body: dict) -> bytes:
+    """The bytes a request sends: compact UTF-8 JSON, written here rather than by httpx.
+
+    httpx 0.28 changed how its `json=` argument serializes (0.27 escaped non-ASCII text and put spaces
+    after separators), so leaving it to httpx made the wire bytes depend on the installed version.
+    """
+    return json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
 
 
 def _json_object(response: httpx.Response) -> dict | None:
@@ -54,6 +65,7 @@ async def post(
         raise ValueError("timeout must be positive and finite")
     if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
         raise ValueError("attempts must be a positive integer")
+    content = encode(body)
     deadline = time.monotonic() + timeout
     last = "no attempt made"
     timed_out = False
@@ -63,7 +75,9 @@ async def post(
             break
         pause = delay * 2**attempt + random.random() * jitter
         try:
-            response = await asyncio.wait_for(http.post(url, json=body, timeout=remaining), remaining)
+            response = await asyncio.wait_for(
+                http.post(url, content=content, headers=JSON, timeout=remaining), remaining
+            )
         except asyncio.TimeoutError:
             last, timed_out = "deadline exceeded", True
             break

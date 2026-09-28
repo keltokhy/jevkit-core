@@ -42,7 +42,13 @@ def _edges(bins: Sequence[float]) -> list[float]:
         edges = [float(edge) for edge in bins]
     except (TypeError, ValueError) as exc:
         raise ValueError("bins must be increasing numeric boundaries from 0 to 1") from exc
-    if len(edges) < 2 or edges[0] != 0 or edges[-1] != 1 or any(high <= low for low, high in pairwise(edges)):
+    if (
+        len(edges) < 2
+        or not all(math.isfinite(edge) for edge in edges)
+        or edges[0] != 0
+        or edges[-1] != 1
+        or any(high <= low for low, high in pairwise(edges))
+    ):
         raise ValueError("bins must be strictly increasing boundaries starting at 0 and ending at 1")
     return edges
 
@@ -98,10 +104,12 @@ def audit_sample(
 
     Each sampled row gains an empty `label`, its `bin` and its `weight`: how many rows of the run it
     stands for, the bin's size over the number drawn from it. Bins with few rows give their places to
-    the others. Rows without a probability are outside the population. The same rows and `seed` give
-    the same sample.
+    the others, and every bin that has rows gets at least one. Rows without a probability are outside
+    the population. The same rows and `seed` give the same sample.
     """
     n, seed, edges = _whole(n, "n", 0), _whole(seed, "seed", 0), _edges(bins)
+    if label in ("bin", "weight"):
+        raise ValueError("label cannot be 'bin' or 'weight', which the sample adds")
     names = _names(edges)
     groups: dict[int, list[Mapping]] = {}
     for row in rows:
@@ -111,6 +119,9 @@ def audit_sample(
         if value is not None:
             groups.setdefault(max(bisect.bisect_left(edges, value) - 1, 0), []).append(row)
     order = sorted(groups)
+    if n < len(order):
+        # A bin with no sampled row would drop out, and nothing would say how much of the run it holds.
+        raise ValueError(f"n must be at least {len(order)}, one row for each bin that has rows")
     counts = _allocation([len(groups[i]) for i in order], n)
     rng = random.Random(seed)
     sample = []

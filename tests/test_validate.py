@@ -40,6 +40,12 @@ def test_small_bins_give_their_places_away_and_rows_without_a_probability_are_le
         audit_sample([{"p": 0.5, "weight": 3}])
     with pytest.raises(ValueError, match="strictly increasing"):
         audit_sample(rows, bins=(0, 0.5, 0.5, 1))
+    with pytest.raises(ValueError, match="strictly increasing"):
+        audit_sample(rows, bins=(0, float("nan"), 1))
+    with pytest.raises(ValueError, match="at least 2, one row for each bin"):
+        audit_sample(rows, n=1)
+    with pytest.raises(ValueError, match="cannot be 'bin'"):
+        audit_sample(rows, label="bin")
 
 
 def test_calibration_weights_each_label_by_what_its_row_stands_for():

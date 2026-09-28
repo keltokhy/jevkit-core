@@ -148,11 +148,10 @@ class Client:
         self.backend = backend
         self.budget = budget if budget is not None else Budget()
         self.timeout, self.attempts = timeout, attempts
-        self._owns_store = store is True or isinstance(store, (str, os.PathLike))
-        if self._owns_store:
-            self.store = AnswerStore() if store is True else AnswerStore(store)
-        else:
-            self.store = store or None
+        # A store the client owns opens on first use, and again if the client is used after `close`.
+        owned = store is True or isinstance(store, (str, os.PathLike))
+        self._store_path = (AnswerStore.default_path() if store is True else store) if owned else None
+        self._store = None if owned else store or None
         self.concurrency, self.transport = concurrency, transport
         self.http2 = transport is None and http2_available()
         self.meter = Meter(provider=backend.name, requested_model=backend.model)
@@ -168,6 +167,12 @@ class Client:
             if workers
             else None
         )
+
+    @property
+    def store(self) -> AnswerStore | None:
+        if self._store is None and self._store_path is not None:
+            self._store = AnswerStore(self._store_path)
+        return self._store
 
     @property
     def model(self) -> str:
@@ -211,17 +216,20 @@ class Client:
     async def close(self) -> None:
         """Stop requests still in the air that no caller waits for, then the connections, the workers, and a
         store this client opened."""
-        flights = [*self._flights.values(), *self._hedges.values()]
-        for task in flights:
-            task.cancel()
-        await asyncio.gather(*flights, return_exceptions=True)
-        if self._http is not None:
-            await self._http.aclose()
-            self._http = None
-        if self._workers is not None:
-            await self._workers.close()
-        if self._owns_store:
-            self.store.close()
+        try:
+            flights = [*self._flights.values(), *self._hedges.values()]
+            for task in flights:
+                task.cancel()
+            await asyncio.gather(*flights, return_exceptions=True)
+            if self._http is not None:
+                await self._http.aclose()
+                self._http = None
+            if self._workers is not None:
+                await self._workers.close()
+        finally:
+            if self._store_path is not None and self._store is not None:
+                self._store.close()
+                self._store = None
 
     async def __aenter__(self) -> Client:
         return self

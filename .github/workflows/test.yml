@@ -1,18 +1,31 @@
 name: test
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"  # Mondays, so a dependency release shows up even in a week with no pushes
 permissions:
   contents: read
 jobs:
   core:
     runs-on: ubuntu-latest
+    # The lockfile pins what the first two legs install. The last leg ignores it and installs the newest
+    # release of every dependency on the newest Python, as a fresh `pip install` would, so an upstream
+    # release that breaks users (pandas 3 broke jlink 0.5.0) fails here instead of in the wild.
     strategy:
+      fail-fast: false
       matrix:
         python: ["3.10", "3.13"]
+        include:
+          - python: "3.14"
+            deps: latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --locked --python ${{ matrix.python }}
-      - run: uv run ruff check src tests scripts
-      - run: uv run ruff format --check src tests scripts
+      - run: uv sync ${{ matrix.deps == 'latest' && '--upgrade' || '--locked' }} --python ${{ matrix.python }}
+      - if: matrix.deps != 'latest'
+        run: uv run ruff check src tests scripts
+      - if: matrix.deps != 'latest'
+        run: uv run ruff format --check src tests scripts
       - run: uv run pytest -q
       - run: uv build --no-sources

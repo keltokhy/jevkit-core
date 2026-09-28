@@ -3,7 +3,7 @@
 `jevkit-runtime` is 0.x: a minor version may break the API. The JevKit tools pin `<0.(n+1)` so a
 new minor release never changes an installed tool.
 
-## Unreleased
+## 0.4.2
 
 - `Client(store=True)` or `Client(store=path)` opens an answer store that the client closes with
   itself; a store passed in stays the caller's to close, and `AnswerStore` is now a context manager.

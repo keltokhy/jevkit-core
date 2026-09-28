@@ -15,7 +15,6 @@ from .protocol import error_detail
 
 RETRYABLE = frozenset({408, 429, 500, 502, 503, 504, 529})
 FATAL = frozenset({401, 402, 403})
-JSON = {"Content-Type": "application/json"}
 
 
 def encode(body: dict) -> bytes:
@@ -75,9 +74,10 @@ async def post(
             break
         pause = delay * 2**attempt + random.random() * jitter
         try:
-            response = await asyncio.wait_for(
-                http.post(url, content=content, headers=JSON, timeout=remaining), remaining
-            )
+            request = http.build_request("POST", url, content=content, timeout=remaining)
+            # As httpx's `json=` does: a client's own Content-Type wins.
+            request.headers.setdefault("Content-Type", "application/json")
+            response = await asyncio.wait_for(http.send(request), remaining)
         except asyncio.TimeoutError:
             last, timed_out = "deadline exceeded", True
             break

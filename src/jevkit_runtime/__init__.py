@@ -34,6 +34,7 @@ from .run import Run, fingerprint
 from .settings import DEFAULT_PRICE_PER_MTOK, Settings
 from .store import AnswerStore, Entry
 from .transport import FATAL, RETRYABLE, post
+from .validate import Calibration, audit_sample, calibration, read_sample, write_sample
 
 __version__ = version("jevkit-runtime")
 __all__ = [
@@ -41,6 +42,7 @@ __all__ = [
     "Answers",
     "Backend",
     "Budget",
+    "Calibration",
     "Choice",
     "Client",
     "DEFAULT_PRICE_PER_MTOK",
@@ -69,6 +71,8 @@ __all__ = [
     "Usage",
     "answer_key",
     "answer_keys",
+    "audit_sample",
+    "calibration",
     "catalog",
     "digest",
     "error_detail",
@@ -80,7 +84,9 @@ __all__ = [
     "parse_answers",
     "parse_usage",
     "post",
+    "read_sample",
     "request_body",
     "resolve",
     "validate_answer",
+    "write_sample",
 ]

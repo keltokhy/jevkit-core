@@ -66,6 +66,7 @@ width. `plan_packed` shows the calls, hits and cost without sending, and `send_p
 | `client.py` | The pipeline above, plans, packed requests, request sharing, hedging |
 | `workers.py` | Sending processes behind `Client(workers=N)`: the client keeps identity, store, sharing, budget and meter; workers post and decode |
 | `run.py` | `Run` and its record: tool, backends, models that answered, questions as asked, usage, budget, inputs; `warnings` |
+| `validate.py` | `audit_sample` for hand labeling, stratified by probability with sampling weights; `calibration` from the labels: reliability table, Brier score, expected calibration error, bootstrap intervals |
 | `stream.py` | `ordered_map`: judge records as a reader thread yields them, a bounded window at a time, results in input order; `open_text` |
 | `cli.py` | The flags every tool shares (`--api --model --budget --timeout -j --no-cache --stats`), help text from the catalog, the stats line, `run_sync` |
 | `meter.py` | Calls, cache hits, retries, hedges, tokens, cost, and which models actually answered |
@@ -76,6 +77,12 @@ Every run can say what it did. `Run(tool, version, inputs=fingerprint(texts))` a
 and how often, each distinct question exactly as asked, calls, cache hits, tokens, cost, and the
 budget, with the tool's own settings under `fields`. `warnings(record)` names what a person should see,
 such as one requested model answered by several.
+
+Every probability can be checked. `audit_sample(rows, n=200)` draws rows from any tool's output, the
+same number from each probability bin, each with the weight of the rows it stands for; a person fills
+in `label`, and `calibration(rows)` says how often the model is right when it says 0.8, with a Brier
+score, the expected calibration error and bootstrap intervals. `write_sample` and `read_sample` keep
+the sample as CSV or JSONL, so labels travel with each row's key and survive a rerun.
 
 ## Conventions every tool shares
 

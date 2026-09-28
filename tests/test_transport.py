@@ -39,6 +39,33 @@ def test_retry_resends_the_same_request_and_counts_only_retries():
     assert retries == [1]
 
 
+def test_the_wire_bytes_are_the_runtimes_not_the_httpx_versions():
+    seen = []
+
+    def fake(request):
+        seen.append((request.content, request.headers["content-type"]))
+        return httpx.Response(200, json={"answers": {}})
+
+    async def exercise(body):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as http:
+            await post(http, "https://fixture.invalid/api", body, provider="fake")
+
+    run(exercise({"state": "évidence", "n": [1, 2]}))
+    assert seen == [('{"state":"évidence","n":[1,2]}'.encode(), "application/json")]
+    seen.clear()
+    with pytest.raises(ValueError):  # NaN is not JSON, so nothing is sent
+        run(exercise({"p": float("nan")}))
+    assert seen == []
+
+    async def own_type():  # a client's own Content-Type is kept, as httpx's `json=` keeps it
+        headers = {"Content-Type": "application/vnd.fixture+json"}
+        async with httpx.AsyncClient(transport=httpx.MockTransport(fake), headers=headers) as http:
+            await post(http, "https://fixture.invalid/api", {}, provider="fake")
+
+    run(own_type())
+    assert seen == [(b"{}", "application/vnd.fixture+json")]
+
+
 def test_deadline_covers_a_body_that_keeps_arriving():
     class SlowBody(httpx.AsyncByteStream):
         async def __aiter__(self):

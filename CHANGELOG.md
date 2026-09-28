@@ -3,6 +3,12 @@
 `jevkit-runtime` is 0.x: a minor version may break the API. The JevKit tools pin `<0.(n+1)` so a
 new minor release never changes an installed tool.
 
+## Unreleased
+
+- Requests are serialized by the runtime as compact UTF-8 JSON rather than by httpx's `json=`, so the
+  bytes on the wire no longer depend on the httpx version (0.27 escaped non-ASCII text and added spaces).
+  They are unchanged on httpx 0.28, which the lockfile pins.
+
 ## 0.4.0
 
 Part of the run-layer plan ([#14](https://github.com/keltokhy/jevkit-core/issues/14)). Breaking.

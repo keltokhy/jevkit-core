@@ -186,7 +186,7 @@ def runtime_from_args(
         backend,
         timeout=args.timeout,
         concurrency=args.concurrency,
-        store=None if args.no_cache else AnswerStore(settings=settings),
+        store=None if args.no_cache else AnswerStore.default_path(settings),
         budget=budget,
         transport=transport,
     )

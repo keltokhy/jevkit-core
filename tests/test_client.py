@@ -1,6 +1,7 @@
 import asyncio
 import dataclasses
 import json
+import sqlite3
 
 import httpx
 import pytest
@@ -77,6 +78,57 @@ def test_a_request_is_sent_once_then_answered_from_the_store(tmp_path):
 
     run(exercise())
     store.close()
+
+
+def test_a_client_closes_a_store_it_opened_and_only_that(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    fake = Fake()
+
+    async def exercise(store):
+        async with fake.client(store=store) as client:
+            await client.ask("évidence", QUESTIONS)
+            return client.store
+
+    for opened in (True, tmp_path / "path.sqlite", str(tmp_path / "text.sqlite")):
+        store = run(exercise(opened))
+        with pytest.raises(sqlite3.ProgrammingError):  # closed with the client
+            store.get("any key")
+        with AnswerStore(store.path) as reopened:  # and its answers were kept
+            assert reopened.db.execute("SELECT COUNT(*) FROM answers").fetchone()[0] == 2
+    assert AnswerStore.default_path().parent == tmp_path / "xdg" / "jev"
+    with AnswerStore(tmp_path / "theirs.sqlite") as theirs:
+        assert run(exercise(theirs)) is theirs
+        assert theirs.db.execute("SELECT COUNT(*) FROM answers").fetchone()[0] == 2  # still open
+    assert run(exercise(None)) is None and run(exercise(False)) is None
+
+
+def test_an_owned_store_opens_when_used_and_closes_even_if_shutdown_fails(tmp_path):
+    fake = Fake()
+    with pytest.raises(ValueError, match="workers"):  # nothing was opened, so nothing leaks
+        Client(BACKEND, store=tmp_path / "never.sqlite", transport=httpx.MockTransport(fake), workers=2)
+    assert not (tmp_path / "never.sqlite").exists()
+
+    client = fake.client(store=tmp_path / "answers.sqlite")
+    assert not (tmp_path / "answers.sqlite").exists()
+
+    async def exercise():
+        await client.ask("évidence", QUESTIONS)
+        store = client.store
+
+        async def broken():
+            raise RuntimeError("connection pool")
+
+        client._http.aclose = broken
+        with pytest.raises(RuntimeError):
+            await client.close()
+        with pytest.raises(sqlite3.ProgrammingError):  # closed all the same
+            store.get("any key")
+        again = await client.ask("évidence", QUESTIONS)  # used again: the store reopens
+        assert again.origins["q"]["source"] == "cache" and len(fake.bodies) == 1
+        del client._http.aclose
+        await client.close()
+
+    run(exercise())
 
 
 def test_only_missing_questions_are_sent_and_a_malformed_stored_answer_is_asked_again(tmp_path):

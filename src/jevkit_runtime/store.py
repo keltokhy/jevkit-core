@@ -119,3 +119,9 @@ class AnswerStore:
         with self._lock:
             if self.db is not None:
                 self.db.close()
+
+    def __enter__(self) -> AnswerStore:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()

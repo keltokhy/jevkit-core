@@ -58,6 +58,7 @@ width. `plan_packed` shows the calls, hits and cost without sending, and `send_p
 |---|---|
 | `settings.py` | Every environment and filesystem convention, read in one place: `XDG_*`, `JEV_API`, `JEV_URL`, `JEV_MODEL`, `JEV_PRICE_PER_MTOK`, `JEV_BUDGET`, provider keys and URL files |
 | `providers.py` | The catalog (`Provider`), a tool's selection of it or its own entries, and `resolve()` to one `Backend`: endpoint, model, key |
+| `image.py` | `Image`: a picture as a reference string, prepared to TypeSafe's limits and sent under `assets` |
 | `question.py` | `Noul`, `Choice` and `Score`: request bodies, full answer validation, reading answers |
 | `protocol.py` | Request bodies, answer identity (plain, joint and packed), usage parsing, provenance |
 | `transport.py` | One HTTP call with a total deadline, retries with backoff and `Retry-After`, structured status errors |
@@ -83,6 +84,31 @@ same number from each probability bin, each with the weight of the rows it stand
 in `label`, and `calibration(rows)` says how often the model is right when it says 0.8, with a Brier
 score, the expected calibration error and bootstrap intervals. `write_sample` and `read_sample` keep
 the sample as CSV or JSONL, so labels travel with each row's key and survive a rerun.
+
+## Images (experimental)
+
+A picture goes anywhere text goes: in the state, in a question's instructions, or in its criteria.
+
+```python
+from jevkit_runtime import Image, Noul
+
+photo = Image("door.jpg")                                # a path or bytes
+answers = await client.ask({"door": photo}, {"q": Noul("Is there a person in `door`?")})
+same = Noul(f"Is the person in `door` the one in {Image('badge.jpg')}?")
+```
+
+An `Image` is a string, its reference: `img-` and a digest of the file and of how it is prepared. So
+the same picture keys the same answers and fingerprints the same run, and a changed one asks again.
+When a request goes out the client finds every reference in it, prepares each file (upright from
+EXIF, longest side at most 1568 px, raised to the 256 px and 280 x 280 minimums, baseline JPEG, PNG
+when it has transparency), adds them under `assets` and sends `TypeSafe-Danger-Zone-Images: true`.
+Animated and unreadable files are refused. Pillow comes from the extra:
+`pip install 'jevkit-runtime[images]'`.
+
+Only providers marked `images` take them: `typesafe` and `gateway`. Any other stops before sending.
+Estimates count each use of an image at `TOKENS_PER_PIXEL` (provisional, 1/750) until TypeSafe says
+how images are billed; the budget settles what the API reports. TypeSafe calls images
+["Dreamer-ready"](https://docs.typesafe.ai/images): the format and accuracy may change.
 
 ## Conventions every tool shares
 

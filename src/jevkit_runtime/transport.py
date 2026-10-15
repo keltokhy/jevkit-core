@@ -11,6 +11,7 @@ import time
 import httpx
 
 from .errors import JevError, ProviderError, ProviderFatal, RequestExhausted
+from .image import HEADER as IMAGES_HEADER
 from .protocol import error_detail
 
 RETRYABLE = frozenset({408, 429, 500, 502, 503, 504, 529})
@@ -77,6 +78,8 @@ async def post(
             request = http.build_request("POST", url, content=content, timeout=remaining)
             # As httpx's `json=` does: a client's own Content-Type wins.
             request.headers.setdefault("Content-Type", "application/json")
+            if "assets" in body:
+                request.headers.update(IMAGES_HEADER)
             response = await asyncio.wait_for(http.send(request), remaining)
         except asyncio.TimeoutError:
             last, timed_out = "deadline exceeded", True

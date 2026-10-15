@@ -24,6 +24,7 @@ class Provider:
     auto_select: bool = True
     price_per_mtok: float | None = None  # when the server reports no cost; None means the list price
     joint_reads: bool = False  # every answer depends on the whole batch of questions, not on its own
+    images: bool = False  # reads images sent as assets (experimental at TypeSafe)
     # Input-token limits, as the provider documents them: a whole request, and the state plus its longest
     # question. None means not known.
     max_request_tokens: int | None = None
@@ -65,6 +66,7 @@ class Backend:
     joint_reads: bool = False
     max_request_tokens: int | None = None
     max_read_tokens: int | None = None
+    images: bool = False
 
 
 # TypeSafe documents 64k tokens per request and 32k for the state plus its longest question.
@@ -79,6 +81,7 @@ PROVIDERS = {
         "jev-1.13.0",
         "TYPESAFE_API_KEY",
         title="TypeSafe's API",
+        images=True,
         **JEV_LIMITS,
     ),
     "openrouter": Provider(
@@ -96,6 +99,7 @@ PROVIDERS = {
         "JEV_GATEWAY_API_KEY",
         url_env="JEV_GATEWAY_URL",
         title="a System One gateway of your own",
+        images=True,  # a gateway forwards the body and headers it is given
         **JEV_LIMITS,
     ),
     # Local servers: chosen only by name, never in place of a configured hosted provider, and free
@@ -222,4 +226,5 @@ def _backend(provider: Provider, key: str, source: str, model: str | None, setti
         provider.joint_reads,
         provider.max_request_tokens,
         provider.max_read_tokens,
+        provider.images,
     )

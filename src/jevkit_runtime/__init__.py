@@ -13,6 +13,7 @@ from .errors import (
     ProviderStatus,
     RequestExhausted,
 )
+from .image import Image
 from .meter import Meter
 from .protocol import (
     Usage,
@@ -49,6 +50,7 @@ __all__ = [
     "Entry",
     "FATAL",
     "Hold",
+    "Image",
     "JevBudgetExceeded",
     "JevError",
     "JevFatal",

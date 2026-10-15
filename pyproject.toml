@@ -16,9 +16,16 @@ Issues = "https://github.com/keltokhy/jevkit-core/issues"
 
 [project.optional-dependencies]
 http2 = ["httpx[http2]>=0.27"]
+images = [
+    "pillow>=10",
+]
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.11"]
+dev = [
+    "pillow>=10",
+    "pytest>=8",
+    "ruff>=0.11",
+]
 
 [build-system]
 requires = ["hatchling"]

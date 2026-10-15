@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .errors import JevError, JevFatal
+from .image import image_tokens
 from .providers import Backend
 from .question import Question
 
@@ -109,8 +110,10 @@ REQUEST_OVERHEAD_TOKENS = 270  # the server's own prompt around a request, as me
 
 def estimate_tokens(body: dict) -> int:
     """Input tokens a request will bill, near enough to budget for: a token per four UTF-8 bytes of its
-    JSON, plus the server's overhead."""
-    return math.ceil(len(json.dumps(body, ensure_ascii=False).encode()) / 4) + REQUEST_OVERHEAD_TOKENS
+    JSON, plus each image it names (once per use), plus the server's overhead. Image files under `assets`
+    are counted through their uses, not their base64 text."""
+    text = json.dumps({k: v for k, v in body.items() if k != "assets"}, ensure_ascii=False)
+    return math.ceil(len(text.encode()) / 4) + image_tokens(text) + REQUEST_OVERHEAD_TOKENS
 
 
 def error_detail(data: dict) -> str:

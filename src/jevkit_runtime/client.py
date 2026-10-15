@@ -16,6 +16,7 @@ import httpx
 from . import transport
 from .budget import Budget, Hold
 from .errors import JevBudgetExceeded, JevError, JevFatal
+from .image import MAX_BODY_BYTES, assets, image_tokens, references
 from .meter import Meter
 from .protocol import (
     REQUEST_OVERHEAD_TOKENS,
@@ -29,7 +30,7 @@ from .protocol import (
     request_body,
     resolved_model,
 )
-from .providers import Backend
+from .providers import PROVIDERS, Backend
 from .question import SLOT, Question
 from .store import AnswerStore
 from .workers import Workers
@@ -123,7 +124,9 @@ def http2_available() -> bool:
 
 
 def _size(value) -> int:
-    return len(json.dumps(value, ensure_ascii=False).encode())
+    """UTF-8 bytes of its JSON, with each image it names counted as the bytes of its estimated tokens."""
+    text = json.dumps(value, ensure_ascii=False)
+    return len(text.encode()) + 4 * image_tokens(text)
 
 
 class Client:
@@ -572,7 +575,7 @@ class Client:
     ) -> tuple[dict[str, tuple[dict, dict]], bool]:
         """Answers for `questions` by id, each with its origin, and whether this caller sent the request."""
         send_keys = {qid: keys[qid] for qid in questions}
-        body = request_body(self.backend.model, state, questions)
+        body = self._with_assets(request_body(self.backend.model, state, questions))
         flight = "|".join(sorted(send_keys.values()))
         task, owner = self._share(
             flight, priority, lambda: self._flight(budget, body, questions, send_keys, priority)
@@ -587,6 +590,21 @@ class Client:
                 flight, task, hedge_after, budget, body, questions, send_keys, priority
             )
         return {qid: (by_key[key], dict(origin)) for qid, key in send_keys.items()}, owner
+
+    def _with_assets(self, body: dict) -> dict:
+        """The body with the image files it names under `assets`; unchanged when it names none."""
+        text = json.dumps(body, ensure_ascii=False)
+        if not references(text):
+            return body
+        if not self.backend.images:
+            able = ", ".join(name for name, p in PROVIDERS.items() if p.images)
+            raise JevFatal(f"{self.backend.name} does not read images; use {able}")
+        body = body | {"assets": assets(text)}
+        if (size := len(transport.encode(body))) > MAX_BODY_BYTES:
+            raise JevError(
+                f"request with {len(body['assets'])} images is {size / 2**20:.1f} MiB, over the 32 MiB limit"
+            )
+        return body
 
     async def _flight(self, budget: Budget, body, questions, keys, priority) -> Flight:
         """One shared request: a slot, then room in the budget, then the call."""

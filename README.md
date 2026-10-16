@@ -106,8 +106,9 @@ Animated and unreadable files are refused. Pillow comes from the extra:
 `pip install 'jevkit-runtime[images]'`.
 
 Only providers marked `images` take them: `typesafe` and `gateway`. Any other stops before sending.
-Estimates count each use of an image at `TOKENS_PER_PIXEL` (provisional, 1/750) until TypeSafe says
-how images are billed; the budget settles what the API reports. TypeSafe calls images
+Estimates count each use of an image at `TOKENS_PER_PIXEL`, 1/340, measured on Jev 1.13.0 with
+`scripts/image_probe.py` (about 6,300 tokens for a 1568 x 1568 image); the budget settles what the API
+reports. TypeSafe calls images
 ["Dreamer-ready"](https://docs.typesafe.ai/images): the format and accuracy may change.
 
 ## Conventions every tool shares

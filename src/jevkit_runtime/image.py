@@ -39,9 +39,10 @@ SHORTEST = 256
 MIN_AREA = 280 * 280
 MAX_FILE_BYTES = 16 * 2**20
 MAX_BODY_BYTES = 32 * 2**20
-# Input tokens one image is assumed to bill, per pixel, until TypeSafe publishes how images are counted.
-# Only reservations and limit checks use it; the budget settles what the API reports.
-TOKENS_PER_PIXEL = 1 / 750
+# Input tokens an image bills, per pixel. Measured on Jev 1.13.0 on 2026-10-16 with scripts/image_probe.py:
+# 339 pixels a token at 280 x 280, rising to 390 at 1568 x 1568. 1/340 keeps reservations at or above the
+# charge. Only reservations and limit checks use it; the budget settles what the API reports.
+TOKENS_PER_PIXEL = 1 / 340
 
 REFERENCE = re.compile(r"img-[0-9a-f]{32}")
 _known: dict[str, Image] = {}

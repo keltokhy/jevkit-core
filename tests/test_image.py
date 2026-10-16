@@ -152,7 +152,9 @@ def test_a_provider_that_cannot_read_images_stops_before_sending():
 
     async def exercise():
         async with Client(local, transport=httpx.MockTransport(fake)) as client:
-            with pytest.raises(JevFatal, match="laya does not read images; use typesafe, gateway"):
+            with pytest.raises(
+                JevFatal, match="laya does not read images; use typesafe, openrouter, gateway"
+            ):
                 await client.ask({"door": Image(picture())}, {"q": Noul("q")})
 
     run(exercise())
@@ -160,6 +162,35 @@ def test_a_provider_that_cannot_read_images_stops_before_sending():
 
 
 def test_which_providers_read_images():
-    assert {name for name, p in PROVIDERS.items() if p.images} == {"typesafe", "gateway"}
-    backend = resolve(catalog("typesafe"), "typesafe", require_key=False)
-    assert backend.images
+    readers = {name: p.images for name, p in PROVIDERS.items() if p.images}
+    assert readers == {"typesafe": "assets", "openrouter": "parts", "gateway": "assets"}
+    backend = resolve(catalog("openrouter"), "openrouter", require_key=False)
+    assert backend.images == "parts"
+
+
+def test_openrouter_reads_each_image_in_place_as_an_image_url_part(tmp_path):
+    fake = Fake()
+    router = Backend(
+        "openrouter", "https://fixture.invalid/decisions", "typesafe/jev-1.14", key="k", images="parts"
+    )
+    photo, badge = Image(picture()), Image(picture(color=(0, 0, 255)))
+    questions = {"same": Noul(f"Is `door` the person in {badge}?"), "plain": Noul("Is it day?")}
+
+    async def exercise():
+        store = tmp_path / "answers.sqlite"
+        async with Client(router, transport=httpx.MockTransport(fake), store=store) as client:
+            await client.ask({"door": photo, "note": "front"}, questions)
+            plan = client.plan({"door": photo, "note": "front"}, questions)
+            return plan
+
+    plan = run(exercise())
+    request, body = fake.requests[0]
+    assert "assets" not in body and next(iter(HEADER)) not in request.headers
+    door = body["state"]["door"]
+    assert door["type"] == "image_url" and door["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert base64.b64decode(door["image_url"]["url"].split(",", 1)[1]) == photo.prepare().data
+    assert body["state"]["note"] == "front"
+    before, part, after = body["questions"]["same"]["instructions"]
+    assert (before, after) == ("Is `door` the person in ", "?") and part["type"] == "image_url"
+    assert body["questions"]["plain"]["instructions"] == "Is it day?"
+    assert plan.complete  # answers are keyed on the references, not on the parts sent

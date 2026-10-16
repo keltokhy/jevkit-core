@@ -41,7 +41,8 @@ def drawing(size, shape: str) -> bytes:
 
 async def main(api: str, model: str | None) -> None:
     # Probed whether or not the catalog marks the provider as reading images: that is what is being checked.
-    backend = dataclasses.replace(resolve(catalog(api), api, model=model), images=True)
+    backend = resolve(catalog(api), api, model=model)
+    backend = dataclasses.replace(backend, images=backend.images or "assets")
     question = {"q": Noul("Does `picture` show a red circle?")}
     rows = []
     async with Client(backend, timeout=60) as client:

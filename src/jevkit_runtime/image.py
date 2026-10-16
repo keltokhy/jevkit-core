@@ -179,5 +179,40 @@ def assets(text: str) -> dict[str, dict]:
     }
 
 
+def part(reference: str) -> dict:
+    """One image as the `image_url` part OpenRouter reads in place of its reference."""
+    prepared = _prepare(reference)
+    kind = "png" if prepared.format == "png" else "jpeg"
+    return {"type": "image_url", "image_url": {"url": f"data:image/{kind};base64,{_b64(prepared.data)}"}}
+
+
+def inline(value):
+    """`value` with each image written in it replaced by its part, for providers that read images in place.
+
+    A string that is exactly a reference becomes the part; a longer string that names images becomes a
+    list of its text and parts, in order. Object keys stay text, as they do for TypeSafe's references.
+    """
+    if isinstance(value, dict):
+        return {key: inline(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [inline(item) for item in value]
+    if not isinstance(value, str) or not references(value):
+        return value
+    if value in _known:
+        return part(value)
+    pieces: list = []
+    at = 0
+    for found in REFERENCE.finditer(value):
+        if found.group() not in _known:
+            continue
+        if found.start() > at:
+            pieces.append(value[at : found.start()])
+        pieces.append(part(found.group()))
+        at = found.end()
+    if at < len(value):
+        pieces.append(value[at:])
+    return pieces
+
+
 def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")

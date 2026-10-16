@@ -105,7 +105,9 @@ when it has transparency), adds them under `assets` and sends `TypeSafe-Danger-Z
 Animated and unreadable files are refused. Pillow comes from the extra:
 `pip install 'jevkit-runtime[images]'`.
 
-Only providers marked `images` take them: `typesafe` and `gateway`. Any other stops before sending.
+Only providers marked `images` take them. `typesafe` and `gateway` get them under `assets`;
+`openrouter` gets each one in place as an `image_url` part, the shape its Decisions API reads (it
+drops `assets` without an error). Any other provider stops before sending.
 Estimates count each use of an image at `TOKENS_PER_PIXEL`, 1/340, measured on Jev 1.13.0 with
 `scripts/image_probe.py` (about 6,300 tokens for a 1568 x 1568 image); the budget settles what the API
 reports. TypeSafe calls images

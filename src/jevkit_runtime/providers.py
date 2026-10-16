@@ -90,6 +90,10 @@ PROVIDERS = {
         "typesafe/jev-1.13",
         "OPENROUTER_API_KEY",
         title="OpenRouter",
+        # Off: on 2026-10-16 OpenRouter answered requests with assets but billed about 28 tokens an image
+        # whatever its size, and answered as if it had not seen it (scripts/image_probe.py). Dropping
+        # images silently is worse than refusing, so the client refuses before sending.
+        images=False,
         **JEV_LIMITS,
     ),
     "gateway": Provider(

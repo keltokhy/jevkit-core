@@ -8,7 +8,8 @@ new minor release never changes an installed tool.
 - Images, experimental: `Image(path_or_bytes)` goes anywhere text goes in a request. Its value is a
   content-addressed reference, so answer keys, the store and run fingerprints need no change; the client
   prepares each named image to TypeSafe's limits, sends it under `assets` with the images header, and
-  refuses providers without `images` (only `typesafe` and `gateway` have it) before sending. Estimates
+  refuses providers without `images` (only `typesafe` and `gateway` have it) before sending. OpenRouter
+  stays off: in a live check it accepted image requests but dropped the images without saying so. Estimates
   count each use of an image instead of its base64, at 1/340 token a pixel as measured live on Jev 1.13.0
   by the new `scripts/image_probe.py`. Pillow comes from the new `images` extra.
 

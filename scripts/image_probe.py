@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import io
 import json
 
@@ -39,7 +40,8 @@ def drawing(size, shape: str) -> bytes:
 
 
 async def main(api: str, model: str | None) -> None:
-    backend = resolve(catalog(api), api, model=model)
+    # Probed whether or not the catalog marks the provider as reading images: that is what is being checked.
+    backend = dataclasses.replace(resolve(catalog(api), api, model=model), images=True)
     question = {"q": Noul("Does `picture` show a red circle?")}
     rows = []
     async with Client(backend, timeout=60) as client:
@@ -75,6 +77,9 @@ async def main(api: str, model: str | None) -> None:
     print(f"TOKENS_PER_PIXEL in use: {TOKENS_PER_PIXEL:.6f}")
     for row in rows:
         print(json.dumps(row))
+    sized = [row for row in rows if "image_tokens" in row]
+    if sized and max(row["image_tokens"] for row in sized) < min(row["estimated"] for row in sized) / 4:
+        print(f"WARNING: {api} bills almost nothing for images of any size; it is probably dropping them")
 
 
 if __name__ == "__main__":

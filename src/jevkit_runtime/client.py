@@ -16,6 +16,7 @@ import httpx
 from . import transport
 from .budget import Budget, Hold
 from .errors import JevBudgetExceeded, JevError, JevFatal
+from .image import MAX_BODY_BYTES, assets, image_tokens, inline, references
 from .meter import Meter
 from .protocol import (
     REQUEST_OVERHEAD_TOKENS,
@@ -29,7 +30,7 @@ from .protocol import (
     request_body,
     resolved_model,
 )
-from .providers import Backend
+from .providers import PROVIDERS, Backend
 from .question import SLOT, Question
 from .store import AnswerStore
 from .workers import Workers
@@ -123,7 +124,9 @@ def http2_available() -> bool:
 
 
 def _size(value) -> int:
-    return len(json.dumps(value, ensure_ascii=False).encode())
+    """UTF-8 bytes of its JSON, with each image it names counted as the bytes of its estimated tokens."""
+    text = json.dumps(value, ensure_ascii=False)
+    return len(text.encode()) + 4 * image_tokens(text)
 
 
 class Client:
@@ -572,10 +575,12 @@ class Client:
     ) -> tuple[dict[str, tuple[dict, dict]], bool]:
         """Answers for `questions` by id, each with its origin, and whether this caller sent the request."""
         send_keys = {qid: keys[qid] for qid in questions}
-        body = request_body(self.backend.model, state, questions)
+        plain = request_body(self.backend.model, state, questions)
+        tokens = estimate_tokens(plain)  # before images are attached, which the estimate counts by use
+        body = self._with_images(plain)
         flight = "|".join(sorted(send_keys.values()))
         task, owner = self._share(
-            flight, priority, lambda: self._flight(budget, body, questions, send_keys, priority)
+            flight, priority, lambda: self._flight(budget, body, tokens, questions, send_keys, priority)
         )
         if priority and not self._flight_priority.get(flight, True):
             hedge_after = 0.0  # a person is waiting: do not queue behind the background lane
@@ -584,17 +589,37 @@ class Client:
             by_key, origin = await asyncio.shield(task)
         else:
             by_key, origin = await self._hedged(
-                flight, task, hedge_after, budget, body, questions, send_keys, priority
+                flight, task, hedge_after, budget, body, tokens, questions, send_keys, priority
             )
         return {qid: (by_key[key], dict(origin)) for qid, key in send_keys.items()}, owner
 
-    async def _flight(self, budget: Budget, body, questions, keys, priority) -> Flight:
-        """One shared request: a slot, then room in the budget, then the call."""
+    def _with_images(self, body: dict) -> dict:
+        """The body carrying the image files it names, as its provider reads them; unchanged when it names
+        none. TypeSafe takes them under `assets` (`images="assets"`, or True); OpenRouter takes each one in
+        place as an `image_url` part (`images="parts"`)."""
+        text = json.dumps(body, ensure_ascii=False)
+        if not (named := references(text)):
+            return body
+        if not self.backend.images:
+            able = ", ".join(name for name, p in PROVIDERS.items() if p.images)
+            raise JevFatal(f"{self.backend.name} does not read images; use {able}")
+        if self.backend.images == "parts":
+            body = body | {"state": inline(body["state"]), "questions": inline(body["questions"])}
+        else:
+            body = body | {"assets": assets(text)}
+        if (size := len(transport.encode(body))) > MAX_BODY_BYTES:
+            raise JevError(
+                f"request with {len(set(named))} images is {size / 2**20:.1f} MiB, over the 32 MiB limit"
+            )
+        return body
+
+    async def _flight(self, budget: Budget, body, tokens: int, questions, keys, priority) -> Flight:
+        """One shared request: a slot, then room in the budget for its `tokens`, then the call."""
         if priority or self._workers is not None:
-            hold = await budget.reserve(self.backend, estimate_tokens(body))
+            hold = await budget.reserve(self.backend, tokens)
             return await self._request(body, questions, keys, hold, priority)
         async with self._slot():
-            hold = await budget.reserve(self.backend, estimate_tokens(body))
+            hold = await budget.reserve(self.backend, tokens)
             return await self._request(body, questions, keys, hold, priority)
 
     def _share(self, flight: str, priority: bool, start: Callable[[], Coroutine[Any, Any, Flight]]):
@@ -614,7 +639,7 @@ class Client:
         task.add_done_callback(discard)
         return task, True
 
-    async def _hedged(self, flight, first, after, budget, body, questions, keys, priority) -> Flight:
+    async def _hedged(self, flight, first, after, budget, body, tokens, questions, keys, priority) -> Flight:
         """The first answer of the shared request or of one second copy per flight, sent if the budget has
         room for it now; neither is cancelled on this caller's account."""
         done, _ = await asyncio.wait({first}, timeout=after)
@@ -622,7 +647,7 @@ class Client:
             return first.result()
         second = self._hedges.get(flight)
         if second is None:
-            hold = budget.try_reserve(self.backend, estimate_tokens(body))
+            hold = budget.try_reserve(self.backend, tokens)
             if hold is None:
                 return await asyncio.shield(first)  # no room for a copy; wait for the first
             second = asyncio.ensure_future(self._request(body, questions, keys, hold, priority))

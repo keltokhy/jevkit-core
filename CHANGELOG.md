@@ -3,7 +3,7 @@
 `jevkit-runtime` is 0.x: a minor version may break the API. The JevKit tools pin `<0.(n+1)` so a
 new minor release never changes an installed tool.
 
-## Unreleased
+## 0.4.3
 
 - Images, experimental: `Image(path_or_bytes)` goes anywhere text goes in a request. Its value is a
   content-addressed reference, so answer keys, the store and run fingerprints need no change; the client
